@@ -271,6 +271,13 @@ bool ElevationMapping::readParameters() {
   nodeHandle_->declare_parameter("multi_height_noise", pow(0.003, 2));
   nodeHandle_->declare_parameter("min_horizontal_variance", pow(resolution / 2.0, 2));  // two-sigma
   nodeHandle_->declare_parameter("max_horizontal_variance", 0.5);
+  nodeHandle_->declare_parameter("edge_aware_fusion", true);
+  nodeHandle_->declare_parameter("enable_skip_lower_points", false);
+  nodeHandle_->declare_parameter("skip_lower_points_duration", 0.5);
+  nodeHandle_->declare_parameter("lower_point_recovery_count", 5);
+  nodeHandle_->declare_parameter("enable_fused_map_hole_filling", false);
+  nodeHandle_->declare_parameter("fused_map_hole_filling_radius", 0.08);
+  nodeHandle_->declare_parameter("fusion_height_difference_threshold", 0.08);
   nodeHandle_->declare_parameter("underlying_map_topic", std::string());
   nodeHandle_->declare_parameter("enable_visibility_cleanup", true);
   nodeHandle_->declare_parameter("enable_continuous_cleanup", false);
@@ -283,6 +290,13 @@ bool ElevationMapping::readParameters() {
   nodeHandle_->get_parameter("multi_height_noise", map_.multiHeightNoise_);
   nodeHandle_->get_parameter("min_horizontal_variance", map_.minHorizontalVariance_);  // two-sigma
   nodeHandle_->get_parameter("max_horizontal_variance", map_.maxHorizontalVariance_);
+  nodeHandle_->get_parameter("edge_aware_fusion", map_.edgeAwareFusion_);
+  nodeHandle_->get_parameter("enable_skip_lower_points", map_.enableSkipLowerPoints_);
+  nodeHandle_->get_parameter("skip_lower_points_duration", map_.skipLowerPointsDuration_);
+  nodeHandle_->get_parameter("lower_point_recovery_count", map_.lowerPointRecoveryCount_);
+  nodeHandle_->get_parameter("enable_fused_map_hole_filling", map_.enableFusedMapHoleFilling_);
+  nodeHandle_->get_parameter("fused_map_hole_filling_radius", map_.fusedMapHoleFillingRadius_);
+  nodeHandle_->get_parameter("fusion_height_difference_threshold", map_.fusionHeightDifferenceThreshold_);
   nodeHandle_->get_parameter("underlying_map_topic", map_.underlyingMapTopic_);
   nodeHandle_->get_parameter("enable_visibility_cleanup", map_.enableVisibilityCleanup_);
   nodeHandle_->get_parameter("enable_continuous_cleanup", map_.enableContinuousCleanup_);

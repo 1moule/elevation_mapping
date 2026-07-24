@@ -259,6 +259,12 @@ class ElevationMap {
   bool clean();
 
   /*!
+   * Fills small holes in a map copy before publication.
+   * @param map the fused map copy to modify.
+   */
+  void fillHolesForPublication(grid_map::GridMap& map) const;
+
+  /*!
    * Resets the fused map data.
    * @return true if successful.
    */
@@ -323,6 +329,13 @@ class ElevationMap {
   double multiHeightNoise_;
   double minHorizontalVariance_;
   double maxHorizontalVariance_;
+  bool edgeAwareFusion_;
+  bool enableSkipLowerPoints_;
+  double skipLowerPointsDuration_;
+  int lowerPointRecoveryCount_;
+  bool enableFusedMapHoleFilling_;
+  double fusedMapHoleFillingRadius_;
+  double fusionHeightDifferenceThreshold_;
   std::string underlyingMapTopic_;
   bool enableVisibilityCleanup_;
   bool enableContinuousCleanup_;

@@ -8,6 +8,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <algorithm>
 
 #include <grid_map_msgs/msg/grid_map.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -37,7 +38,8 @@ ElevationMap::ElevationMap(std::shared_ptr<rclcpp::Node> nodeHandle)
     : nodeHandle_(nodeHandle),
       rawMap_({"elevation", "variance", "horizontal_variance_x", "horizontal_variance_y", 
       "horizontal_variance_xy", "color", "time","dynamic_time", "lowest_scan_point", 
-      "sensor_x_at_lowest_scan", "sensor_y_at_lowest_scan", "sensor_z_at_lowest_scan"}),
+      "sensor_x_at_lowest_scan", "sensor_y_at_lowest_scan", "sensor_z_at_lowest_scan",
+      "lower_point_height", "lower_point_time", "lower_point_count"}),
       fusedMap_({"elevation", "upper_bound", "lower_bound", "color"}),
       // FIXME: Postprocessor num threads should be same as number of filters
       postprocessorPool_(nodeHandle_->get_parameter("postprocessor_num_threads").as_int(), nodeHandle_),
@@ -48,6 +50,13 @@ ElevationMap::ElevationMap(std::shared_ptr<rclcpp::Node> nodeHandle)
       multiHeightNoise_(0.000009),
       minHorizontalVariance_(0.0001),
       maxHorizontalVariance_(0.05),
+      edgeAwareFusion_(true),
+      enableSkipLowerPoints_(false),
+      skipLowerPointsDuration_(0.5),
+      lowerPointRecoveryCount_(5),
+      enableFusedMapHoleFilling_(false),
+      fusedMapHoleFillingRadius_(0.08),
+      fusionHeightDifferenceThreshold_(0.08),
       enableVisibilityCleanup_(true),
       enableContinuousCleanup_(false),
       visibilityCleanupDuration_(0.0),
@@ -104,6 +113,9 @@ bool ElevationMap::add(const PointCloudType::Ptr pointCloud, Eigen::VectorXf& po
   auto& sensorXatLowestScanLayer = rawMap_["sensor_x_at_lowest_scan"];
   auto& sensorYatLowestScanLayer = rawMap_["sensor_y_at_lowest_scan"];
   auto& sensorZatLowestScanLayer = rawMap_["sensor_z_at_lowest_scan"];
+  auto& lowerPointHeightLayer = rawMap_["lower_point_height"];
+  auto& lowerPointTimeLayer = rawMap_["lower_point_time"];
+  auto& lowerPointCountLayer = rawMap_["lower_point_count"];
 
   std::vector<Eigen::Ref<const grid_map::Matrix>> basicLayers_;
   for (const std::string& layer : rawMap_.getBasicLayers()) {
@@ -131,8 +143,11 @@ bool ElevationMap::add(const PointCloudType::Ptr pointCloud, Eigen::VectorXf& po
     auto& sensorXatLowestScan = sensorXatLowestScanLayer(index(0), index(1));
     auto& sensorYatLowestScan = sensorYatLowestScanLayer(index(0), index(1));
     auto& sensorZatLowestScan = sensorZatLowestScanLayer(index(0), index(1));
+    auto& lowerPointHeight = lowerPointHeightLayer(index(0), index(1));
+    auto& lowerPointTime = lowerPointTimeLayer(index(0), index(1));
+    auto& lowerPointCount = lowerPointCountLayer(index(0), index(1));
 
-    const float& pointVariance = 1e-11 * pointCloudVariances(i);
+    const float pointVariance = std::max(static_cast<float>(minVariance_), static_cast<float>(pointCloudVariances(i)));
     bool isValid = std::all_of(basicLayers_.begin(), basicLayers_.end(),
                                [&](Eigen::Ref<const grid_map::Matrix> layer) { 
                                 return std::isfinite(layer(index(0), index(1))); });
@@ -146,25 +161,84 @@ bool ElevationMap::add(const PointCloudType::Ptr pointCloud, Eigen::VectorXf& po
       horizontalVarianceY = minHorizontalVariance_;
       horizontalVarianceXY = 0.0;
       grid_map::colorVectorToValue(point.getRGBVector3i(), color);
+      time = scanTimeSinceInitialization;
+      dynamicTime = currentTimeSecondsPattern;
+      lowestScanPoint = point.z + 3.0 * sqrt(pointVariance);
+      const grid_map::Position3 sensorTranslation(transformationSensorToMap.translation());
+      sensorXatLowestScan = sensorTranslation.x();
+      sensorYatLowestScan = sensorTranslation.y();
+      sensorZatLowestScan = sensorTranslation.z();
+      lowerPointHeight = NAN;
+      lowerPointTime = NAN;
+      lowerPointCount = 0.0f;
       continue;
     }
 
     // RCLCPP_INFO(nodeHandle_->get_logger(), "Elevation: %f, Point Z: %f, Variance: %f", elevation, point.z, variance);
     // Deal with multiple heights in one cell.
     const double mahalanobisDistance = fabs(point.z - elevation) / sqrt(variance);  // NOLINT(cppcoreguidelines-pro-type-union-access)
+    const double cellAge = scanTimeSinceInitialization - time;
     // RCLCPP_INFO(nodeHandle_->get_logger(), "Mahalanobis Distance: %f", mahalanobisDistance);
     if (mahalanobisDistance > mahalanobisDistanceThreshold_) {
       // RCLCPP_INFO(nodeHandle_->get_logger(), "Mahalanobis distance exceeds threshold.");
-      if (scanTimeSinceInitialization - time <= scanningDuration_ &&
+      if ((scanTimeSinceInitialization - time <= scanningDuration_ ||
+           (enableSkipLowerPoints_ && cellAge <= skipLowerPointsDuration_)) &&
           elevation > point.z) {  // NOLINT(cppcoreguidelines-pro-type-union-access)
           // RCLCPP_INFO(nodeHandle_->get_logger(), "Ignoring point, lower than existing elevation and within scanning duration.");
         // Ignore point if measurement is from the same point cloud (time comparison) and
         // if measurement is lower then the elevation in the map.
+        const float pointHeightPlusUncertainty = point.z + 3.0 * sqrt(pointVariance);  // 3 sigma.
+        if (std::isnan(lowestScanPoint) || pointHeightPlusUncertainty < lowestScanPoint) {
+          lowestScanPoint = pointHeightPlusUncertainty;
+          const grid_map::Position3 sensorTranslation(transformationSensorToMap.translation());
+          sensorXatLowestScan = sensorTranslation.x();
+          sensorYatLowestScan = sensorTranslation.y();
+          sensorZatLowestScan = sensorTranslation.z();
+        }
+        if (enableSkipLowerPoints_) {
+          const bool newLowerScan = std::isnan(lowerPointTime) || fabs(scanTimeSinceInitialization - lowerPointTime) > 0.0001;
+          const bool sameLowerHeight = !std::isnan(lowerPointHeight) && fabs(point.z - lowerPointHeight) <= fusionHeightDifferenceThreshold_;
+          if (!sameLowerHeight) {
+            lowerPointHeight = point.z;
+            lowerPointCount = 1.0f;
+          } else if (newLowerScan) {
+            lowerPointHeight = 0.5f * (lowerPointHeight + point.z);
+            lowerPointCount += 1.0f;
+          }
+          lowerPointTime = scanTimeSinceInitialization;
+        }
+      } else if (enableSkipLowerPoints_ && elevation > point.z) {
+        const bool newLowerScan = std::isnan(lowerPointTime) || fabs(scanTimeSinceInitialization - lowerPointTime) > 0.0001;
+        const bool sameLowerHeight = !std::isnan(lowerPointHeight) && fabs(point.z - lowerPointHeight) <= fusionHeightDifferenceThreshold_;
+        if (!sameLowerHeight) {
+          lowerPointHeight = point.z;
+          lowerPointCount = 1.0f;
+        } else if (newLowerScan) {
+          lowerPointHeight = 0.5f * (lowerPointHeight + point.z);
+          lowerPointCount += 1.0f;
+        }
+        lowerPointTime = scanTimeSinceInitialization;
+        if (lowerPointCount >= lowerPointRecoveryCount_) {
+          elevation = lowerPointHeight;
+          variance = pointVariance;
+          time = scanTimeSinceInitialization;
+          dynamicTime = currentTimeSecondsPattern;
+          horizontalVarianceX = minHorizontalVariance_;
+          horizontalVarianceY = minHorizontalVariance_;
+          horizontalVarianceXY = 0.0;
+          lowerPointHeight = NAN;
+          lowerPointTime = NAN;
+          lowerPointCount = 0.0f;
+          grid_map::colorVectorToValue(point.getRGBVector3i(), color);
+        }
       } else if (scanTimeSinceInitialization - time <= scanningDuration_) {
         // RCLCPP_INFO(nodeHandle_->get_logger(), "Point is higher, updating elevation and variance.");
         // If point is higher.
         elevation = point.z;  // NOLINT(cppcoreguidelines-pro-type-union-access)
         variance = pointVariance;
+        lowerPointHeight = NAN;
+        lowerPointTime = NAN;
+        lowerPointCount = 0.0f;
         
       } else {
         // RCLCPP_INFO(nodeHandle_->get_logger(), "Increasing variance due to multi-height noise.");
@@ -198,6 +272,9 @@ bool ElevationMap::add(const PointCloudType::Ptr pointCloud, Eigen::VectorXf& po
     horizontalVarianceX = minHorizontalVariance_;
     horizontalVarianceY = minHorizontalVariance_;
     horizontalVarianceXY = 0.0;
+    lowerPointHeight = NAN;
+    lowerPointTime = NAN;
+    lowerPointCount = 0.0f;
     // RCLCPP_INFO(nodeHandle_->get_logger(), "Updated map cell: Elevation = %f, Variance = %f", elevation, variance);
   }
 
@@ -285,6 +362,8 @@ bool ElevationMap::fuse(const grid_map::Index& topLeftIndex, const grid_map::Ind
       continue;
     }
 
+    const float centerElevation = rawMapCopy.at("elevation", *areaIterator);
+
     // Get size of error ellipse.
     const float& sigmaXsquare = rawMapCopy.at("horizontal_variance_x", *areaIterator);
     const float& sigmaYsquare = rawMapCopy.at("horizontal_variance_y", *areaIterator);
@@ -341,7 +420,12 @@ bool ElevationMap::fuse(const grid_map::Index& topLeftIndex, const grid_map::Ind
         continue;
       }
 
-      means[i] = rawMapCopy.at("elevation", *ellipseIterator);
+      const float candidateElevation = rawMapCopy.at("elevation", *ellipseIterator);
+      if (edgeAwareFusion_ && std::fabs(candidateElevation - centerElevation) > fusionHeightDifferenceThreshold_) {
+        continue;
+      }
+
+      means[i] = candidateElevation;
 
       // Compute weight from probability.
       grid_map::Position absolutePosition;
@@ -569,12 +653,63 @@ bool ElevationMap::publishFusedElevationMap() {
   boost::recursive_mutex::scoped_lock scopedLock(fusedMapMutex_);
   grid_map::GridMap fusedMapCopy = fusedMap_;
   scopedLock.unlock();
+  fillHolesForPublication(fusedMapCopy);
   fusedMapCopy.add("uncertainty_range", fusedMapCopy.get("upper_bound") - fusedMapCopy.get("lower_bound"));
   std::unique_ptr<grid_map_msgs::msg::GridMap> message;
   message = grid_map::GridMapRosConverter::toMessage(fusedMapCopy);
   elevationMapFusedPublisher_->publish(std::move(message));
   RCLCPP_DEBUG(nodeHandle_->get_logger(), "Elevation map (fused) has been published.");
   return true;
+}
+
+void ElevationMap::fillHolesForPublication(grid_map::GridMap& map) const {
+  if (!enableFusedMapHoleFilling_ || fusedMapHoleFillingRadius_ <= 0.0 || !map.exists("elevation")) {
+    return;
+  }
+
+  const grid_map::GridMap originalMap = map;
+  for (grid_map::GridMapIterator iterator(map); !iterator.isPastEnd(); ++iterator) {
+    const grid_map::Index index(*iterator);
+    if (std::isfinite(originalMap.at("elevation", index))) {
+      continue;
+    }
+
+    grid_map::Position center;
+    originalMap.getPosition(index, center);
+    double bestDistanceSquared = std::numeric_limits<double>::infinity();
+    grid_map::Index bestIndex;
+    bool foundNeighbor = false;
+
+    for (grid_map::CircleIterator neighborIterator(originalMap, center, fusedMapHoleFillingRadius_); !neighborIterator.isPastEnd(); ++neighborIterator) {
+      const grid_map::Index neighborIndex(*neighborIterator);
+      if (!std::isfinite(originalMap.at("elevation", neighborIndex))) {
+        continue;
+      }
+      grid_map::Position neighborPosition;
+      originalMap.getPosition(neighborIndex, neighborPosition);
+      const double distanceSquared = (neighborPosition - center).squaredNorm();
+      if (distanceSquared < bestDistanceSquared) {
+        bestDistanceSquared = distanceSquared;
+        bestIndex = neighborIndex;
+        foundNeighbor = true;
+      }
+    }
+
+    if (!foundNeighbor) {
+      continue;
+    }
+
+    map.at("elevation", index) = originalMap.at("elevation", bestIndex);
+    if (map.exists("upper_bound") && originalMap.exists("upper_bound")) {
+      map.at("upper_bound", index) = originalMap.at("upper_bound", bestIndex);
+    }
+    if (map.exists("lower_bound") && originalMap.exists("lower_bound")) {
+      map.at("lower_bound", index) = originalMap.at("lower_bound", bestIndex);
+    }
+    if (map.exists("color") && originalMap.exists("color")) {
+      map.at("color", index) = originalMap.at("color", bestIndex);
+    }
+  }
 }
 
 bool ElevationMap::publishVisibilityCleanupMap() {
