@@ -5,6 +5,36 @@ usage() {
   echo "Usage: $0 BAG OUTPUT_DIR FEATURE_ENABLED ROS_DOMAIN_ID" >&2
 }
 
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
+resolve_workspace_setup() {
+  local candidate
+  local candidates=(
+    "${ELEVATION_MAPPING_WORKSPACE_SETUP:-}"
+    "$SCRIPT_DIR/../../../install/setup.bash"
+    "$SCRIPT_DIR/../../../setup.bash"
+  )
+  for candidate in "${candidates[@]}"; do
+    if [[ -n "$candidate" && -f "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+if [[ ${1:-} == "--print-workspace-setup" ]]; then
+  if [[ $# -ne 1 ]]; then
+    usage
+    exit 2
+  fi
+  if ! resolve_workspace_setup; then
+    echo "Unable to infer elevation_mapping workspace setup; set ELEVATION_MAPPING_WORKSPACE_SETUP" >&2
+    exit 2
+  fi
+  exit 0
+fi
+
 if [[ $# -ne 4 ]]; then
   usage
   exit 2
@@ -36,24 +66,31 @@ if [[ ! "$DOMAIN_ID" =~ ^[0-9]+$ ]] || (( DOMAIN_ID > 232 )); then
   exit 2
 fi
 
-SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 BAG=$(realpath "$BAG_INPUT")
 
-# Source the fixed underlay, then the workspace containing this source or
-# installed script when one can be inferred.
-source /opt/ros/humble/setup.bash
-source /home/guanlin/catkin_ws/install/setup.bash
-WORKSPACE_SETUPS=(
-  "${ELEVATION_MAPPING_WORKSPACE_SETUP:-}"
-  "$SCRIPT_DIR/../../../install/setup.bash"
-  "$SCRIPT_DIR/../../../setup.bash"
-)
-for workspace_setup in "${WORKSPACE_SETUPS[@]}"; do
-  if [[ -n "$workspace_setup" && -f "$workspace_setup" ]]; then
-    source "$workspace_setup"
-    break
+# Source the ROS underlay, optional developer underlay, and inferred overlay.
+ROS_SETUP=${ELEVATION_MAPPING_ROS_SETUP:-/opt/ros/humble/setup.bash}
+if [[ ! -f "$ROS_SETUP" ]]; then
+  echo "ROS setup does not exist: $ROS_SETUP" >&2
+  exit 2
+fi
+source "$ROS_SETUP"
+
+if [[ -n ${ELEVATION_MAPPING_DEV_UNDERLAY_SETUP:-} ]]; then
+  if [[ ! -f "$ELEVATION_MAPPING_DEV_UNDERLAY_SETUP" ]]; then
+    echo "Developer underlay setup does not exist: $ELEVATION_MAPPING_DEV_UNDERLAY_SETUP" >&2
+    exit 2
   fi
-done
+  source "$ELEVATION_MAPPING_DEV_UNDERLAY_SETUP"
+elif [[ -f /home/guanlin/catkin_ws/install/setup.bash ]]; then
+  source /home/guanlin/catkin_ws/install/setup.bash
+fi
+
+if ! workspace_setup=$(resolve_workspace_setup); then
+  echo "Unable to infer elevation_mapping workspace setup; set ELEVATION_MAPPING_WORKSPACE_SETUP" >&2
+  exit 2
+fi
+source "$workspace_setup"
 
 mkdir -p "$OUTPUT_DIR_INPUT"
 OUTPUT_DIR=$(realpath "$OUTPUT_DIR_INPUT")

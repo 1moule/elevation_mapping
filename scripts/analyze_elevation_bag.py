@@ -108,8 +108,24 @@ def decode_layer(array, outer_start_index, inner_start_index):
         raise ValueError("GridMap layer dimensions must be positive")
 
     data_offset = int(array.layout.data_offset)
-    required_size = data_offset + rows * columns
-    if data_offset < 0 or len(array.data) < required_size:
+    outer_dimension, inner_dimension = dimensions
+    outer_size = int(outer_dimension.size)
+    outer_stride = int(outer_dimension.stride)
+    inner_stride = int(inner_dimension.stride)
+    if outer_stride <= 0 or inner_stride <= 0:
+        raise ValueError("GridMap layer dimension strides must be positive")
+    if outer_stride % outer_size != 0:
+        raise ValueError("GridMap outer dimension stride is not indexable")
+    outer_index_stride = outer_stride // outer_size
+    if outer_index_stride != inner_stride or inner_stride < int(inner_dimension.size):
+        raise ValueError("GridMap layer dimension strides are inconsistent")
+
+    greatest_index = (
+        data_offset
+        + (outer_size - 1) * outer_index_stride
+        + int(inner_dimension.size) - 1
+    )
+    if data_offset < 0 or greatest_index >= len(array.data):
         raise ValueError("GridMap layer data is shorter than its dimensions")
 
     row_major = labels[0] == "row_index"
@@ -120,9 +136,10 @@ def decode_layer(array, outer_start_index, inner_start_index):
         for logical_column in range(columns):
             physical_column = (int(inner_start_index) + logical_column) % columns
             if row_major:
-                flat_index = physical_row * columns + physical_column
+                outer_index, inner_index = physical_row, physical_column
             else:
-                flat_index = physical_column * rows + physical_row
+                outer_index, inner_index = physical_column, physical_row
+            flat_index = outer_index * outer_index_stride + inner_index
             row_values.append(float(array.data[data_offset + flat_index]))
         decoded.append(row_values)
     return decoded
@@ -162,6 +179,16 @@ def is_edge_cell(world_key, finite_heights, separation):
         local_height_range(world_key, finite_heights) > EDGE_HEIGHT_THRESHOLD
         or (math.isfinite(separation) and separation > EDGE_HEIGHT_THRESHOLD)
     )
+
+
+def multimodal_separation_for_cell(mode_count, separation):
+    if (
+        math.isfinite(mode_count)
+        and mode_count >= 2.0
+        and math.isfinite(separation)
+    ):
+        return separation
+    return None
 
 
 def transition_width_cells(world_key, heights, resolution):
@@ -352,6 +379,13 @@ def analyze_bag(bag_path, mapper_cpu_seconds):
             elevation, secondary, mode_count, separation = values
             if is_edge_cell(key, heights, separation):
                 edge_keys.add(key)
+            valid_multimodal_separation = multimodal_separation_for_cell(
+                mode_count, separation
+            )
+            if valid_multimodal_separation is not None:
+                multimodal_cell_count += 1
+                multimodal_keys.add(key)
+                multimodal_separations.append(valid_multimodal_separation)
             if not math.isfinite(elevation):
                 continue
             timelines.setdefault(key, []).append(
@@ -363,11 +397,7 @@ def analyze_bag(bag_path, mapper_cpu_seconds):
             if neighbor_range >= FLAT_HEIGHT_THRESHOLD:
                 nonflat_keys.add(key)
 
-            if math.isfinite(mode_count) and mode_count >= 2.0:
-                multimodal_cell_count += 1
-                multimodal_keys.add(key)
-                if math.isfinite(separation):
-                    multimodal_separations.append(separation)
+            if valid_multimodal_separation is not None:
                 transition_widths.append(
                     transition_width_cells(key, heights, resolution)
                 )
@@ -498,6 +528,20 @@ def variation_for_keys(metrics, world_keys):
     return percentile(values, 0.95)
 
 
+def missing_variation_keys(metrics, world_keys):
+    try:
+        per_key = metrics["temporal_variation_by_key"]
+        if not isinstance(per_key, dict):
+            raise TypeError("temporal_variation_by_key must be an object")
+    except (KeyError, TypeError) as error:
+        raise ValueError(
+            "invalid temporal_variation_by_key in metrics file"
+        ) from error
+    return sorted(
+        key for key in world_keys if world_key_to_string(key) not in per_key
+    )
+
+
 def mean(values):
     values = list(values)
     if not values:
@@ -572,6 +616,18 @@ def compare_metrics(baseline, candidates):
     for candidate in candidates:
         union_edge_keys.update(metric_world_keys(candidate, "edge_keys"))
     baseline_flat_keys = metric_world_keys(baseline, "flat_keys")
+    diagnostics = []
+    missing_baseline_flat_variation = False
+    for candidate_index, candidate in enumerate(candidates, start=1):
+        missing_keys = missing_variation_keys(candidate, baseline_flat_keys)
+        if missing_keys:
+            missing_baseline_flat_variation = True
+        for key in missing_keys:
+            diagnostics.append(
+                "candidate "
+                f"{candidate_index} missing temporal variation for baseline flat key "
+                f"{world_key_to_string(key)}"
+            )
 
     baseline_switches = sum_switches(baseline, union_edge_keys)
     candidate_switches = mean(
@@ -589,6 +645,8 @@ def compare_metrics(baseline, candidates):
         variation_for_keys(candidate, baseline_flat_keys)
         for candidate in candidates
     )
+    if missing_baseline_flat_variation:
+        candidate_flat_p95 = max(candidate_flat_p95, baseline_flat_p95)
     baseline_cpu_seconds = numeric_metric(baseline, "mapper_cpu_seconds")
     candidate_cpu_seconds = mean(
         numeric_metric(candidate, "mapper_cpu_seconds")
@@ -599,7 +657,6 @@ def compare_metrics(baseline, candidates):
         for candidate in candidates
     )
 
-    diagnostics = []
     switch_ratio = denominator_ratio(
         candidate_switches,
         baseline_switches,
@@ -742,6 +799,19 @@ def run_self_test():
         [12.0, 10.0, 11.0],
         [2.0, 0.0, 1.0],
     ]
+    padded_array = SimpleNamespace(
+        layout=SimpleNamespace(
+            data_offset=2,
+            dim=[
+                SimpleNamespace(label="row_index", size=2, stride=8),
+                SimpleNamespace(label="column_index", size=3, stride=4),
+            ],
+        ),
+        data=[-1.0, -1.0, 10.0, 11.0, 12.0, -1.0, 20.0, 21.0, 22.0],
+    )
+    assert decode_layer(
+        padded_array, outer_start_index=1, inner_start_index=2
+    ) == [[22.0, 20.0, 21.0], [12.0, 10.0, 11.0]]
 
     with tempfile.TemporaryDirectory() as directory:
         cpu_file = Path(directory) / "mapper_time.txt"
@@ -759,6 +829,29 @@ def run_self_test():
     }
     assert transition_width_cells((0, 0), heights, resolution=0.04) == 1.0
     assert is_edge_cell((0, 0), {}, 0.10)
+    assert multimodal_separation_for_cell(2.0, 0.10) == 0.10
+    assert multimodal_separation_for_cell(2.0, float("nan")) is None
+
+    baseline_metrics = {
+        "edge_keys": [],
+        "edge_transition_width_p95_cells": 0.0,
+        "flat_keys": [[1, 1]],
+        "mapper_cpu_seconds": 1.0,
+        "mean_finite_cell_coverage": 1.0,
+        "switch_counts_by_key": {},
+        "temporal_variation_by_key": {"1,1": [0.01]},
+    }
+    missing_flat_key_candidate = dict(baseline_metrics)
+    missing_flat_key_candidate["temporal_variation_by_key"] = {}
+    report, diagnostics = compare_metrics(
+        baseline_metrics, [missing_flat_key_candidate] * 3
+    )
+    assert report["flat_variation_ratio"] == 1.0
+    assert diagnostics == [
+        "candidate 1 missing temporal variation for baseline flat key 1,1",
+        "candidate 2 missing temporal variation for baseline flat key 1,1",
+        "candidate 3 missing temporal variation for baseline flat key 1,1",
+    ]
 
 
 def parse_args():
