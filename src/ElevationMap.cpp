@@ -289,6 +289,8 @@ ElevationMap::ElevationMap(std::shared_ptr<rclcpp::Node> nodeHandle)
       // FIXME: Postprocessor num threads should be same as number of filters
       postprocessorPool_(nodeHandle_->get_parameter("postprocessor_num_threads").as_int(), nodeHandle_),
       hasUnderlyingMap_(false),
+      initialTime_(0, 0, nodeHandle->get_clock()->get_clock_type()),
+      isInitialTimeSet_(false),
       minVariance_(0.000009),
       maxVariance_(0.0009),
       mahalanobisDistanceThreshold_(1.5),
@@ -328,8 +330,6 @@ ElevationMap::ElevationMap(std::shared_ptr<rclcpp::Node> nodeHandle)
   // TODO(max): if (enableVisibilityCleanup_) when parameter cleanup is ready.
   visibilityCleanupMapPublisher_ = nodeHandle_->create_publisher<grid_map_msgs::msg::GridMap>("visibility_cleanup_map", 1);
 
-  initialTime_ = rclcpp::Time(
-      0, 0, nodeHandle_->get_clock()->get_clock_type());
 }
 
 ElevationMap::~ElevationMap() = default;
@@ -351,8 +351,9 @@ bool ElevationMap::add(const PointCloudType::Ptr pointCloud, Eigen::VectorXf& po
   boost::recursive_mutex::scoped_lock scopedLockForRawData(rawMapMutex_);
 
   // Update initial time if it is not initialized.
-  if (initialTime_.nanoseconds() == 0) {
+  if (!isInitialTimeSet_) {
     initialTime_ = timestamp;
+    isInitialTimeSet_ = true;
   }
   const float scanTimeSinceInitialization = (timestamp - initialTime_).seconds();
   const auto rawMapSize = rawMap_.getSize();

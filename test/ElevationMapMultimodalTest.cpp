@@ -108,7 +108,9 @@ class ElevationMapMultimodalTest : public testing::Test {
     map_.scanningDuration_ = 0.3;
   }
 
-  void addScan(const std::vector<TestPoint>& points, double seconds) {
+  void addScanAtTime(
+      const std::vector<TestPoint>& points,
+      const rclcpp::Time& timestamp) {
     PointCloudType::Ptr cloud(new PointCloudType);
     cloud->reserve(points.size());
     for (const auto& source : points) {
@@ -125,8 +127,12 @@ class ElevationMapMultimodalTest : public testing::Test {
     Eigen::VectorXf variances = Eigen::VectorXf::Constant(
         static_cast<Eigen::Index>(points.size()), 1e-4f);
     ASSERT_TRUE(map_.add(
-        cloud, variances, baseTime_ + rclcpp::Duration::from_seconds(seconds),
-        Eigen::Affine3d::Identity()));
+        cloud, variances, timestamp, Eigen::Affine3d::Identity()));
+  }
+
+  void addScan(const std::vector<TestPoint>& points, double seconds) {
+    addScanAtTime(
+        points, baseTime_ + rclcpp::Duration::from_seconds(seconds));
   }
 
   void initializeUpperAndLowerSurfaces() {
@@ -200,6 +206,25 @@ TEST_F(ElevationMapMultimodalTest, AnchorsRelativeTimeAtFirstScan) {
   addSingleSurfaceScan(-0.10f, 0.0);
 
   EXPECT_EQ(initialTime().nanoseconds(), baseTime_.nanoseconds());
+}
+
+TEST_F(
+    ElevationMapMultimodalTest,
+    ZeroTimeFirstScanDoesNotReanchorOrRetainStalePrimary) {
+  configureImmediateLowerPointRecovery();
+  const auto clockType = node_->get_clock()->get_clock_type();
+  addScanAtTime(
+      makeAmbiguousPoints(0.0, 0.0, true),
+      rclcpp::Time(0, 0, clockType));
+  ASSERT_NEAR(elevationAtTarget(), 0.20f, 0.02f);
+
+  addScanAtTime(
+      {{0.0f, 0.0f, -0.30f}},
+      rclcpp::Time(static_cast<int64_t>(600000000), clockType));
+
+  EXPECT_EQ(initialTime().nanoseconds(), 0);
+  EXPECT_NEAR(elevationAtTarget(), -0.30f, 0.02f);
+  EXPECT_FLOAT_EQ(rawValueAt("height_mode_count", 0.0, 0.0), 0.0f);
 }
 
 TEST_F(

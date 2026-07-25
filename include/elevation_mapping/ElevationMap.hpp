@@ -327,6 +327,7 @@ class ElevationMap {
 
   //! Initial ros time
   rclcpp::Time initialTime_;
+  bool isInitialTimeSet_;
 
   //! Parameters. Are set through the ElevationMapping class.
   double minVariance_;
