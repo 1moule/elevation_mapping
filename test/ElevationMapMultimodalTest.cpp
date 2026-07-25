@@ -101,6 +101,13 @@ class ElevationMapMultimodalTest : public testing::Test {
     map_.enableMultimodalCells_ = enabled;
   }
 
+  void configureImmediateLowerPointRecovery() {
+    map_.enableSkipLowerPoints_ = true;
+    map_.skipLowerPointsDuration_ = 0.0;
+    map_.lowerPointRecoveryCount_ = 1;
+    map_.scanningDuration_ = 0.3;
+  }
+
   void addScan(const std::vector<TestPoint>& points, double seconds) {
     PointCloudType::Ptr cloud(new PointCloudType);
     cloud->reserve(points.size());
@@ -208,6 +215,32 @@ TEST_F(ElevationMapMultimodalTest, UsesLegacyPathWhenFeatureDisabled) {
   EXPECT_TRUE(std::isnan(secondaryElevationAtTarget()));
 }
 
+TEST_F(
+    ElevationMapMultimodalTest,
+    BootstrapsSeparatedSingleSurfaceReturnsFromLegacyElevation) {
+  configureImmediateLowerPointRecovery();
+  addSingleSurfaceScan(0.20f, 0.0);
+  addSingleSurfaceScan(-0.30f, 1.0);
+
+  EXPECT_NEAR(elevationAtTarget(), 0.20f, 0.02f);
+  addSingleSurfaceScan(0.20f, 1.1);
+  EXPECT_NEAR(elevationAtTarget(), 0.20f, 0.02f);
+  EXPECT_NEAR(secondaryElevationAtTarget(), -0.30f, 0.02f);
+  EXPECT_FLOAT_EQ(rawValueAt("height_mode_count", 0.0, 0.0), 2.0f);
+}
+
+TEST_F(
+    ElevationMapMultimodalTest,
+    SparseSeparatedReturnDoesNotOverwriteLegacyElevation) {
+  configureImmediateLowerPointRecovery();
+  addSingleSurfaceScan(0.20f, 0.0);
+
+  addScan({{0.0f, 0.0f, -0.30f}}, 1.0);
+
+  EXPECT_NEAR(elevationAtTarget(), 0.20f, 0.02f);
+  EXPECT_FLOAT_EQ(rawValueAt("height_mode_count", 0.0, 0.0), 1.0f);
+}
+
 TEST_F(ElevationMapMultimodalTest, FusesMultimodalDiagnosticsFromCenterCell) {
   initializeUpperAndLowerSurfaces();
 
@@ -235,6 +268,19 @@ TEST_F(ElevationMapMultimodalTest, LegacyPointOrderDoesNotOverwritePrimary) {
 
   EXPECT_NEAR(elevationAtTarget(), -0.30f, 0.02f);
   EXPECT_NEAR(secondaryElevationAtTarget(), 0.20f, 0.02f);
+}
+
+TEST_F(
+    ElevationMapMultimodalTest,
+    UnsupportedCurrentPointsDoNotOverwriteMultimodalPrimary) {
+  addScan(makeAmbiguousPoints(0.0, 0.0, false), 0.0);
+  ASSERT_NEAR(elevationAtTarget(), -0.30f, 0.02f);
+
+  addScan({{0.0f, 0.0f, 0.20f}}, 0.1);
+
+  EXPECT_NEAR(elevationAtTarget(), -0.30f, 0.02f);
+  EXPECT_NEAR(secondaryElevationAtTarget(), 0.20f, 0.02f);
+  EXPECT_FLOAT_EQ(rawValueAt("height_mode_count", 0.0, 0.0), 2.0f);
 }
 
 TEST_F(ElevationMapMultimodalTest, ExpiresSecondaryWithoutPointInCell) {

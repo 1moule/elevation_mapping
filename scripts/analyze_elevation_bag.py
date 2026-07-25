@@ -24,6 +24,8 @@ RETURN_WINDOW_SECONDS = 1.0
 TRANSITION_MARGIN_METERS = 0.02
 REFERENCE_CELL_SIZE_METERS = 0.04
 COMPARISON_TOLERANCE = 1e-6
+ROI_MIN_FINITE_FRACTION = 0.50
+ROI_MAX_TEMPORAL_SPREAD_METERS = 0.03
 
 
 def count_vertical_switches(times, heights, threshold, return_window):
@@ -242,6 +244,136 @@ def key_list(world_keys):
     return [[world_key[0], world_key[1]] for world_key in sorted(world_keys)]
 
 
+def parse_world_key(serialized_key):
+    try:
+        fields = serialized_key.split(",")
+        if len(fields) != 2:
+            raise ValueError
+        return int(fields[0]), int(fields[1])
+    except (AttributeError, TypeError, ValueError) as error:
+        raise ValueError(f"invalid serialized world key: {serialized_key}") from error
+
+
+def four_connected_components(world_keys):
+    remaining = set(world_keys)
+    components = []
+    while remaining:
+        seed = min(remaining)
+        remaining.remove(seed)
+        component = {seed}
+        frontier = [seed]
+        while frontier:
+            x_key, y_key = frontier.pop()
+            for neighbor in (
+                (x_key - 1, y_key),
+                (x_key + 1, y_key),
+                (x_key, y_key - 1),
+                (x_key, y_key + 1),
+            ):
+                if neighbor in remaining:
+                    remaining.remove(neighbor)
+                    component.add(neighbor)
+                    frontier.append(neighbor)
+        components.append(component)
+    return sorted(components, key=lambda component: (-len(component), min(component)))
+
+
+def cell_statistics(metrics):
+    try:
+        serialized_statistics = metrics["cell_statistics_by_key"]
+        if not isinstance(serialized_statistics, dict):
+            raise TypeError("cell_statistics_by_key must be an object")
+        result = {}
+        for serialized_key, values in serialized_statistics.items():
+            if not isinstance(values, dict):
+                raise TypeError("cell statistics must be objects")
+            result[parse_world_key(serialized_key)] = {
+                "finite_frame_count": int(values["finite_frame_count"]),
+                "elevation_p05": float(values["elevation_p05"]),
+                "elevation_p50": float(values["elevation_p50"]),
+                "elevation_p95": float(values["elevation_p95"]),
+            }
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("invalid cell_statistics_by_key in metrics file") from error
+    return result
+
+
+def derive_target_roi(baseline):
+    frame_count = int(numeric_metric(baseline, "frame_count"))
+    if frame_count <= 0:
+        raise ValueError("frame_count must be positive")
+    statistics = cell_statistics(baseline)
+    minimum_frame_count = math.ceil(frame_count * ROI_MIN_FINITE_FRACTION)
+    eligible_keys = {
+        key
+        for key, values in statistics.items()
+        if values["finite_frame_count"] >= minimum_frame_count
+        and values["elevation_p95"] - values["elevation_p05"]
+        <= ROI_MAX_TEMPORAL_SPREAD_METERS + COMPARISON_TOLERANCE
+    }
+    components = four_connected_components(eligible_keys)
+    if not components:
+        raise ValueError("baseline geometry produced no eligible target ROI")
+
+    roi_keys = components[0]
+    resolution = float(
+        baseline.get("map_resolution", REFERENCE_CELL_SIZE_METERS)
+    )
+    if not math.isfinite(resolution) or resolution <= 0.0:
+        raise ValueError("map_resolution must be finite and positive")
+    x_values = [key[0] * resolution for key in roi_keys]
+    y_values = [key[1] * resolution for key in roi_keys]
+    median_heights = [
+        statistics[key]["elevation_p50"] for key in roi_keys
+    ]
+    height_bin_counts = {}
+    for height in median_heights:
+        lower = math.floor(height / 0.05) * 0.05
+        label = f"[{lower:.2f},{lower + 0.05:.2f})"
+        height_bin_counts[label] = height_bin_counts.get(label, 0) + 1
+
+    definition = {
+        "cell_count": len(roi_keys),
+        "derivation": (
+            "largest 4-connected component of feature-disabled baseline cells "
+            "finite in at least 50% of frames with elevation p95-p05 <= 0.03 m"
+        ),
+        "eligible_cell_count": len(eligible_keys),
+        "height_bin_counts_5cm": dict(
+            sorted(height_bin_counts.items())
+        ),
+        "median_elevation_p05": percentile(median_heights, 0.05),
+        "median_elevation_p50": percentile(median_heights, 0.50),
+        "median_elevation_p95": percentile(median_heights, 0.95),
+        "other_component_count": len(components) - 1,
+        "second_largest_component_cell_count": (
+            len(components[1]) if len(components) > 1 else 0
+        ),
+        "source": "feature-disabled baseline only",
+        "world_bounds": {
+            "x_max": max(x_values),
+            "x_min": min(x_values),
+            "y_max": max(y_values),
+            "y_min": min(y_values),
+        },
+    }
+    return roi_keys, definition
+
+
+def mean_roi_coverage(metrics, roi_keys):
+    frame_count = int(numeric_metric(metrics, "frame_count"))
+    if frame_count <= 0 or not roi_keys:
+        raise ValueError("ROI coverage requires frames and ROI cells")
+    statistics = cell_statistics(metrics)
+    finite_observations = 0
+    for key in roi_keys:
+        count = statistics.get(key, {}).get("finite_frame_count", 0)
+        if count < 0 or count > frame_count:
+            raise ValueError("finite_frame_count is outside the frame count")
+        finite_observations += count
+    return finite_observations / (frame_count * len(roi_keys))
+
+
 def message_timestamp(message, bag_timestamp_nanoseconds):
     stamp = message.header.stamp
     timestamp = float(stamp.sec) + float(stamp.nanosec) * 1e-9
@@ -359,14 +491,21 @@ def analyze_bag(bag_path, mapper_cpu_seconds):
     multimodal_keys = set()
     multimodal_cell_count = 0
     multimodal_separations = []
+    multimodal_separations_by_key = {}
     transition_widths = []
+    transition_widths_by_key = {}
     frame_coverages = []
     frame_count = 0
+    map_resolution = None
 
     for message, bag_timestamp in read_grid_map_messages(bag_path):
         timestamp, resolution, cell_count, values_by_key = decode_frame(
             message, bag_timestamp
         )
+        if map_resolution is None:
+            map_resolution = resolution
+        elif abs(map_resolution - resolution) > COMPARISON_TOLERANCE:
+            raise ValueError("GridMap resolution changed during replay")
         frame_count += 1
         heights = {
             key: values[0]
@@ -386,6 +525,9 @@ def analyze_bag(bag_path, mapper_cpu_seconds):
                 multimodal_cell_count += 1
                 multimodal_keys.add(key)
                 multimodal_separations.append(valid_multimodal_separation)
+                multimodal_separations_by_key.setdefault(key, []).append(
+                    valid_multimodal_separation
+                )
             if not math.isfinite(elevation):
                 continue
             timelines.setdefault(key, []).append(
@@ -398,8 +540,10 @@ def analyze_bag(bag_path, mapper_cpu_seconds):
                 nonflat_keys.add(key)
 
             if valid_multimodal_separation is not None:
-                transition_widths.append(
-                    transition_width_cells(key, heights, resolution)
+                width = transition_width_cells(key, heights, resolution)
+                transition_widths.append(width)
+                transition_widths_by_key.setdefault(key, []).append(
+                    width
                 )
 
     if frame_count == 0:
@@ -431,8 +575,24 @@ def analyze_bag(bag_path, mapper_cpu_seconds):
     serialized_variations = {
         world_key_to_string(key): variations[key] for key in sorted(variations)
     }
+    serialized_cell_statistics = {
+        world_key_to_string(key): {
+            "elevation_p05": percentile(
+                (sample[1] for sample in timelines[key]), 0.05
+            ),
+            "elevation_p50": percentile(
+                (sample[1] for sample in timelines[key]), 0.50
+            ),
+            "elevation_p95": percentile(
+                (sample[1] for sample in timelines[key]), 0.95
+            ),
+            "finite_frame_count": len(timelines[key]),
+        }
+        for key in sorted(timelines)
+    }
 
     metrics = {
+        "cell_statistics_by_key": serialized_cell_statistics,
         "edge_keys": key_list(edge_keys),
         "edge_transition_width_p95_cells": percentile(
             transition_widths, 0.95
@@ -440,6 +600,7 @@ def analyze_bag(bag_path, mapper_cpu_seconds):
         "flat_keys": key_list(flat_keys),
         "flat_variation_p95": percentile(flat_variations, 0.95),
         "frame_count": frame_count,
+        "map_resolution": map_resolution,
         "mapper_cpu_seconds": float(mapper_cpu_seconds),
         "mean_finite_cell_coverage": sum(frame_coverages) / len(frame_coverages),
         "multimodal_cell_count": multimodal_cell_count,
@@ -456,9 +617,17 @@ def analyze_bag(bag_path, mapper_cpu_seconds):
         "multimodal_separation_p95": percentile(
             multimodal_separations, 0.95
         ),
+        "multimodal_separations_by_key": {
+            world_key_to_string(key): multimodal_separations_by_key[key]
+            for key in sorted(multimodal_separations_by_key)
+        },
         "multimodal_world_key_count": len(multimodal_keys),
         "switch_counts_by_key": serialized_switch_counts,
         "temporal_variation_by_key": serialized_variations,
+        "transition_widths_by_key": {
+            world_key_to_string(key): transition_widths_by_key[key]
+            for key in sorted(transition_widths_by_key)
+        },
         "vertical_switch_count": sum(
             switch_counts.get(key, 0) for key in edge_keys
         ),
@@ -537,9 +706,91 @@ def missing_variation_keys(metrics, world_keys):
         raise ValueError(
             "invalid temporal_variation_by_key in metrics file"
         ) from error
-    return sorted(
-        key for key in world_keys if world_key_to_string(key) not in per_key
-    )
+    missing = []
+    for key in world_keys:
+        serialized_key = world_key_to_string(key)
+        if serialized_key not in per_key:
+            missing.append(key)
+            continue
+        values = per_key[serialized_key]
+        if not isinstance(values, list):
+            values = [values]
+        if not values:
+            missing.append(key)
+    return sorted(missing)
+
+
+def keys_with_variation(metrics, world_keys):
+    try:
+        per_key = metrics["temporal_variation_by_key"]
+        if not isinstance(per_key, dict):
+            raise TypeError("temporal_variation_by_key must be an object")
+        return {
+            key
+            for key in world_keys
+            if per_key.get(world_key_to_string(key), [])
+        }
+    except (KeyError, TypeError) as error:
+        raise ValueError(
+            "invalid temporal_variation_by_key in metrics file"
+        ) from error
+
+
+def values_for_keys(metrics, field, world_keys):
+    try:
+        per_key = metrics[field]
+        if not isinstance(per_key, dict):
+            raise TypeError(f"{field} must be an object")
+        values = []
+        for key in world_keys:
+            key_values = per_key.get(world_key_to_string(key), [])
+            if not isinstance(key_values, list):
+                key_values = [key_values]
+            values.extend(float(value) for value in key_values)
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(f"invalid {field} in metrics file") from error
+    return values
+
+
+def keyed_values_for_roi(metrics, field, roi_keys):
+    try:
+        per_key = metrics[field]
+        if not isinstance(per_key, dict):
+            raise TypeError(f"{field} must be an object")
+    except (KeyError, TypeError) as error:
+        raise ValueError(f"invalid {field} in metrics file") from error
+    return {
+        world_key_to_string(key): per_key[world_key_to_string(key)]
+        for key in sorted(roi_keys)
+        if world_key_to_string(key) in per_key
+    }
+
+
+def roi_determinism_signature(metrics, roi_keys):
+    return {
+        "cell_statistics_by_key": keyed_values_for_roi(
+            metrics, "cell_statistics_by_key", roi_keys
+        ),
+        "edge_keys": key_list(
+            metric_world_keys(metrics, "edge_keys") & roi_keys
+        ),
+        "flat_keys": key_list(
+            metric_world_keys(metrics, "flat_keys") & roi_keys
+        ),
+        "frame_count": int(numeric_metric(metrics, "frame_count")),
+        "multimodal_separations_by_key": keyed_values_for_roi(
+            metrics, "multimodal_separations_by_key", roi_keys
+        ),
+        "switch_counts_by_key": keyed_values_for_roi(
+            metrics, "switch_counts_by_key", roi_keys
+        ),
+        "temporal_variation_by_key": keyed_values_for_roi(
+            metrics, "temporal_variation_by_key", roi_keys
+        ),
+        "transition_widths_by_key": keyed_values_for_roi(
+            metrics, "transition_widths_by_key", roi_keys
+        ),
+    }
 
 
 def mean(values):
@@ -608,18 +859,23 @@ def denominator_ratio(
     return candidate / baseline
 
 
-def compare_metrics(baseline, candidates):
-    if len(candidates) != 3:
-        raise ValueError("comparison requires exactly three candidate metrics")
-
+def compare_metric_scope(baseline, candidates, roi_keys=None):
     union_edge_keys = metric_world_keys(baseline, "edge_keys")
     for candidate in candidates:
         union_edge_keys.update(metric_world_keys(candidate, "edge_keys"))
     baseline_flat_keys = metric_world_keys(baseline, "flat_keys")
+    if roi_keys is not None:
+        union_edge_keys.intersection_update(roi_keys)
+        baseline_flat_keys.intersection_update(roi_keys)
     diagnostics = []
     missing_baseline_flat_variation = False
+    baseline_flat_keys_with_variation = keys_with_variation(
+        baseline, baseline_flat_keys
+    )
     for candidate_index, candidate in enumerate(candidates, start=1):
-        missing_keys = missing_variation_keys(candidate, baseline_flat_keys)
+        missing_keys = missing_variation_keys(
+            candidate, baseline_flat_keys_with_variation
+        )
         if missing_keys:
             missing_baseline_flat_variation = True
         for key in missing_keys:
@@ -630,21 +886,31 @@ def compare_metrics(baseline, candidates):
             )
 
     baseline_switches = sum_switches(baseline, union_edge_keys)
-    candidate_switches = mean(
+    candidate_switch_values = [
         sum_switches(candidate, union_edge_keys) for candidate in candidates
-    )
-    baseline_coverage = numeric_metric(
-        baseline, "mean_finite_cell_coverage"
-    )
-    candidate_coverage = mean(
-        numeric_metric(candidate, "mean_finite_cell_coverage")
-        for candidate in candidates
-    )
+    ]
+    candidate_switches = mean(candidate_switch_values)
+    if roi_keys is None:
+        baseline_coverage = numeric_metric(
+            baseline, "mean_finite_cell_coverage"
+        )
+        candidate_coverage_values = [
+            numeric_metric(candidate, "mean_finite_cell_coverage")
+            for candidate in candidates
+        ]
+    else:
+        baseline_coverage = mean_roi_coverage(baseline, roi_keys)
+        candidate_coverage_values = [
+            mean_roi_coverage(candidate, roi_keys)
+            for candidate in candidates
+        ]
+    candidate_coverage = mean(candidate_coverage_values)
     baseline_flat_p95 = variation_for_keys(baseline, baseline_flat_keys)
-    candidate_flat_p95 = mean(
+    candidate_flat_values = [
         variation_for_keys(candidate, baseline_flat_keys)
         for candidate in candidates
-    )
+    ]
+    candidate_flat_p95 = mean(candidate_flat_values)
     if missing_baseline_flat_variation:
         candidate_flat_p95 = max(candidate_flat_p95, baseline_flat_p95)
     baseline_cpu_seconds = numeric_metric(baseline, "mapper_cpu_seconds")
@@ -652,10 +918,22 @@ def compare_metrics(baseline, candidates):
         numeric_metric(candidate, "mapper_cpu_seconds")
         for candidate in candidates
     )
-    edge_transition_width_cells = max(
-        numeric_metric(candidate, "edge_transition_width_p95_cells")
-        for candidate in candidates
-    )
+    if roi_keys is None:
+        candidate_width_values = [
+            numeric_metric(candidate, "edge_transition_width_p95_cells")
+            for candidate in candidates
+        ]
+    else:
+        candidate_width_values = [
+            percentile(
+                values_for_keys(
+                    candidate, "transition_widths_by_key", roi_keys
+                ),
+                0.95,
+            )
+            for candidate in candidates
+        ]
+    edge_transition_width_cells = max(candidate_width_values)
 
     switch_ratio = denominator_ratio(
         candidate_switches,
@@ -690,11 +968,23 @@ def compare_metrics(baseline, candidates):
     )
     cpu_increase_ratio = None if cpu_ratio is None else cpu_ratio - 1.0
 
-    determinism_mismatches = [
-        mismatch
-        for candidate in candidates[1:]
-        if (mismatch := compare_values(candidates[0], candidate)) is not None
+    determinism_values = [
+        {
+            "edge_transition_width_p95_cells": candidate_width_values[index],
+            "finite_cell_coverage": candidate_coverage_values[index],
+            "flat_variation_p95": candidate_flat_values[index],
+            "frame_count": int(
+                numeric_metric(candidate, "frame_count")
+            ),
+            "vertical_switch_count": candidate_switch_values[index],
+        }
+        for index, candidate in enumerate(candidates)
     ]
+    determinism_mismatches = []
+    for candidate in determinism_values[1:]:
+        mismatch = compare_values(determinism_values[0], candidate)
+        if mismatch is not None:
+            determinism_mismatches.append(mismatch)
     diagnostics.extend(
         f"candidate determinism mismatch: {mismatch}"
         for mismatch in determinism_mismatches
@@ -710,36 +1000,72 @@ def compare_metrics(baseline, candidates):
         "vertical_switch_reduction": vertical_switch_reduction,
     }
 
+    return report, diagnostics
+
+
+def compare_metrics(baseline, candidates):
+    if len(candidates) != 3:
+        raise ValueError("comparison requires exactly three candidate metrics")
+
+    roi_keys, roi_definition = derive_target_roi(baseline)
+    report, diagnostics = compare_metric_scope(
+        baseline, candidates, roi_keys
+    )
+    whole_scene_report, whole_scene_diagnostics = compare_metric_scope(
+        baseline, candidates
+    )
+    report["roi_definition"] = roi_definition
+    report["roi_raw_candidate_notes"] = [
+        f"candidate {index} raw ROI mismatch: {mismatch}"
+        for index, candidate in enumerate(candidates[1:], start=2)
+        if (
+            mismatch := compare_values(
+                roi_determinism_signature(candidates[0], roi_keys),
+                roi_determinism_signature(candidate, roi_keys),
+            )
+        )
+        is not None
+    ]
+    report["whole_scene_diagnostics"] = whole_scene_report
+    report["whole_scene_notes"] = whole_scene_diagnostics
+    report["whole_scene_raw_candidate_notes"] = [
+        f"candidate {index} raw whole-scene mismatch: {mismatch}"
+        for index, candidate in enumerate(candidates[1:], start=2)
+        if (mismatch := compare_values(candidates[0], candidate)) is not None
+    ]
+
     checks = (
         (
-            vertical_switch_reduction is not None
-            and vertical_switch_reduction
+            report["vertical_switch_reduction"] is not None
+            and report["vertical_switch_reduction"]
             >= 0.80 - COMPARISON_TOLERANCE,
             "vertical_switch_reduction must be >= 0.80",
         ),
         (
-            finite_coverage_ratio is not None
-            and finite_coverage_ratio
+            report["finite_coverage_ratio"] is not None
+            and report["finite_coverage_ratio"]
             >= 0.95 - COMPARISON_TOLERANCE,
             "finite_coverage_ratio must be >= 0.95",
         ),
         (
-            flat_variation_ratio is not None
-            and flat_variation_ratio
+            report["flat_variation_ratio"] is not None
+            and report["flat_variation_ratio"]
             <= 1.00 + COMPARISON_TOLERANCE,
             "flat_variation_ratio must be <= 1.00",
         ),
         (
-            edge_transition_width_cells <= 1.0 + COMPARISON_TOLERANCE,
+            report["edge_transition_width_cells"]
+            <= 1.0 + COMPARISON_TOLERANCE,
             "edge_transition_width_cells must be <= 1",
         ),
         (
-            candidate_runs_identical,
+            report["candidate_runs_identical"],
             "candidate_runs_identical must be true",
         ),
         (
-            cpu_increase_ratio is not None
-            and cpu_increase_ratio <= 0.25 + COMPARISON_TOLERANCE,
+            report["cpu_increase_ratio"] is not None
+            and report["cpu_increase_ratio"]
+            <= 0.25 + COMPARISON_TOLERANCE,
             "cpu_increase_ratio must be <= 0.25",
         ),
     )
@@ -832,14 +1158,77 @@ def run_self_test():
     assert multimodal_separation_for_cell(2.0, 0.10) == 0.10
     assert multimodal_separation_for_cell(2.0, float("nan")) is None
 
+    roi_baseline = {
+        "frame_count": 10,
+        "cell_statistics_by_key": {
+            "0,0": {
+                "finite_frame_count": 8,
+                "elevation_p05": 0.00,
+                "elevation_p50": 0.00,
+                "elevation_p95": 0.01,
+            },
+            "1,0": {
+                "finite_frame_count": 8,
+                "elevation_p05": 0.00,
+                "elevation_p50": 0.00,
+                "elevation_p95": 0.01,
+            },
+            "2,0": {
+                "finite_frame_count": 8,
+                "elevation_p05": 0.20,
+                "elevation_p50": 0.20,
+                "elevation_p95": 0.21,
+            },
+            "10,10": {
+                "finite_frame_count": 10,
+                "elevation_p05": 1.00,
+                "elevation_p50": 1.00,
+                "elevation_p95": 1.01,
+            },
+            "0,1": {
+                "finite_frame_count": 4,
+                "elevation_p05": 0.00,
+                "elevation_p50": 0.00,
+                "elevation_p95": 0.01,
+            },
+            "1,1": {
+                "finite_frame_count": 10,
+                "elevation_p05": 0.00,
+                "elevation_p50": 0.10,
+                "elevation_p95": 0.10,
+            },
+        },
+    }
+    roi_keys, roi_definition = derive_target_roi(roi_baseline)
+    assert roi_keys == {(0, 0), (1, 0), (2, 0)}
+    assert roi_definition["cell_count"] == 3
+    assert roi_definition["world_bounds"] == {
+        "x_max": 0.08,
+        "x_min": 0.0,
+        "y_max": 0.0,
+        "y_min": 0.0,
+    }
+    assert mean_roi_coverage(roi_baseline, roi_keys) == 0.8
+
     baseline_metrics = {
+        "cell_statistics_by_key": {
+            "1,1": {
+                "finite_frame_count": 2,
+                "elevation_p05": 0.0,
+                "elevation_p50": 0.0,
+                "elevation_p95": 0.0,
+            }
+        },
         "edge_keys": [],
         "edge_transition_width_p95_cells": 0.0,
         "flat_keys": [[1, 1]],
+        "frame_count": 2,
         "mapper_cpu_seconds": 1.0,
         "mean_finite_cell_coverage": 1.0,
+        "multimodal_separations_by_key": {},
         "switch_counts_by_key": {},
         "temporal_variation_by_key": {"1,1": [0.01]},
+        "transition_widths_by_key": {},
     }
     missing_flat_key_candidate = dict(baseline_metrics)
     missing_flat_key_candidate["temporal_variation_by_key"] = {}
@@ -852,6 +1241,46 @@ def run_self_test():
         "candidate 2 missing temporal variation for baseline flat key 1,1",
         "candidate 3 missing temporal variation for baseline flat key 1,1",
     ]
+
+    present_empty_candidate = dict(baseline_metrics)
+    present_empty_candidate["temporal_variation_by_key"] = {"1,1": []}
+    assert missing_variation_keys(
+        present_empty_candidate, {(1, 1)}
+    ) == [(1, 1)]
+
+    roi_candidate = dict(baseline_metrics)
+    global_only_difference = dict(baseline_metrics)
+    global_only_difference["edge_keys"] = [[50, 50]]
+    global_only_difference["switch_counts_by_key"] = {"50,50": 1}
+    comparison, diagnostics = compare_metrics(
+        baseline_metrics,
+        [roi_candidate, global_only_difference, roi_candidate],
+    )
+    assert comparison["candidate_runs_identical"]
+    assert not comparison["whole_scene_diagnostics"][
+        "candidate_runs_identical"
+    ]
+    assert not diagnostics
+
+    diagnostic_only_difference = dict(baseline_metrics)
+    diagnostic_only_difference["cell_statistics_by_key"] = {
+        "1,1": {
+            "finite_frame_count": 2,
+            "elevation_p05": 0.50,
+            "elevation_p50": 0.50,
+            "elevation_p95": 0.50,
+        }
+    }
+    comparison, diagnostics = compare_metrics(
+        baseline_metrics,
+        [
+            baseline_metrics,
+            diagnostic_only_difference,
+            baseline_metrics,
+        ],
+    )
+    assert comparison["candidate_runs_identical"]
+    assert not diagnostics
 
 
 def parse_args():

@@ -361,7 +361,9 @@ TEST(MultimodalSelection, EmptyObservationAgesPrimaryAndExpiresSecondary) {
   MultimodalCellState state = twoModeState();
   const auto result = updateMultimodalCell(state, observation({}), 0.7, config());
 
-  EXPECT_FALSE(result.handled);
+  EXPECT_TRUE(result.handled);
+  EXPECT_EQ(result.modeCount, 1u);
+  EXPECT_NEAR(result.primary.height, -0.30f, 1e-6f);
   EXPECT_TRUE(state.modes[0].valid);
   EXPECT_NEAR(state.modes[0].confidence, 0.75f, 1e-6f);
   EXPECT_FALSE(state.modes[1].valid);

@@ -407,6 +407,54 @@ bool ElevationMap::add(const PointCloudType::Ptr pointCloud, Eigen::VectorXf& po
           static_cast<float>(cellCenter.y()),
           static_cast<float>(rawMap_.getResolution()), multimodalConfig_);
       auto state = decodeMultimodalState(multimodalStateMap_, index);
+      if (countValidModes(state) == 0) {
+        const float legacyHeight = rawMap_.at("elevation", index);
+        const float legacyVariance = rawMap_.at("variance", index);
+        const bool separatedSupportedReturn =
+            observation.modeCount == 1 &&
+            std::fabs(legacyHeight - observation.modes[0].height) >
+                multimodalConfig_.modeSeparation;
+        const bool separatedUnsupportedReturn =
+            observation.modeCount == 0 &&
+            std::any_of(
+                pointsByCell[key].begin(), pointsByCell[key].end(),
+                [&](const MultimodalPoint& point) {
+                  return std::isfinite(point.height) &&
+                         std::fabs(legacyHeight - point.height) >
+                             multimodalConfig_.modeSeparation;
+                });
+        if (std::isfinite(legacyHeight) && std::isfinite(legacyVariance) &&
+            legacyVariance > 0.0f &&
+            (separatedSupportedReturn || separatedUnsupportedReturn)) {
+          auto& incumbent = state.modes[0];
+          incumbent.valid = true;
+          incumbent.height = legacyHeight;
+          incumbent.variance = legacyVariance;
+          incumbent.color = rawMap_.at("color", index);
+          if (!std::isfinite(incumbent.color)) {
+            incumbent.color = observation.modeCount == 1
+                                  ? observation.modes[0].color
+                                  : pointsByCell[key].front().color;
+          }
+          incumbent.lowestPointHeight =
+              rawMap_.at("lowest_scan_point", index);
+          if (!std::isfinite(incumbent.lowestPointHeight)) {
+            incumbent.lowestPointHeight =
+                legacyHeight + 3.0f * std::sqrt(legacyVariance);
+          }
+          incumbent.confidence = 1.0f;
+          incumbent.lastSeen = scanTimeSinceInitialization;
+          incumbent.coverageBins =
+              observation.modeCount == 1
+                  ? countOccupiedBins(observation.modes[0].xyMask)
+                  : 0;
+          incumbent.consecutiveObservations = 1;
+          incumbent.centerOccupied =
+              observation.modeCount == 1 &&
+              observation.modes[0].centerOccupied;
+          state.primaryIndex = 0;
+        }
+      }
       auto result = updateMultimodalCell(
           state, observation, scanTimeSinceInitialization, multimodalConfig_);
       encodeMultimodalState(multimodalStateMap_, index, state);

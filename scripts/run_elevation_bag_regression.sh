@@ -6,6 +6,11 @@ usage() {
 }
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+POSE_LEAD_SECONDS=1.0
+POSE_TOPICS=(/fastlio2/lio_odom)
+CLOUD_TOPICS=(/tf /fastlio2/body_cloud)
+MAPPER_READY_LOG="Successfully launched node."
+MAPPER_CALLBACK_THREADS=1
 
 resolve_workspace_setup() {
   local candidate
@@ -23,6 +28,32 @@ resolve_workspace_setup() {
   return 1
 }
 
+source_setup() {
+  set +u
+  source "$1"
+  set -u
+}
+
+mapper_stop_status_is_expected() {
+  case "$1" in
+    0|130|245)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+if [[ ${1:-} == "--check-mapper-stop-status" ]]; then
+  if [[ $# -ne 2 ]]; then
+    usage
+    exit 2
+  fi
+  mapper_stop_status_is_expected "$2"
+  exit
+fi
+
 if [[ ${1:-} == "--print-workspace-setup" ]]; then
   if [[ $# -ne 1 ]]; then
     usage
@@ -32,6 +63,19 @@ if [[ ${1:-} == "--print-workspace-setup" ]]; then
     echo "Unable to infer elevation_mapping workspace setup; set ELEVATION_MAPPING_WORKSPACE_SETUP" >&2
     exit 2
   fi
+  exit 0
+fi
+
+if [[ ${1:-} == "--print-replay-plan" ]]; then
+  if [[ $# -ne 1 ]]; then
+    usage
+    exit 2
+  fi
+  printf 'mapper_ready_log=%s\n' "$MAPPER_READY_LOG"
+  printf 'mapper_callback_threads=%s\n' "$MAPPER_CALLBACK_THREADS"
+  printf 'pose_topics=%s\n' "${POSE_TOPICS[0]}"
+  printf 'pose_lead_seconds=%s\n' "$POSE_LEAD_SECONDS"
+  printf 'cloud_topics=%s,%s\n' "${CLOUD_TOPICS[0]}" "${CLOUD_TOPICS[1]}"
   exit 0
 fi
 
@@ -74,23 +118,23 @@ if [[ ! -f "$ROS_SETUP" ]]; then
   echo "ROS setup does not exist: $ROS_SETUP" >&2
   exit 2
 fi
-source "$ROS_SETUP"
+source_setup "$ROS_SETUP"
 
 if [[ -n ${ELEVATION_MAPPING_DEV_UNDERLAY_SETUP:-} ]]; then
   if [[ ! -f "$ELEVATION_MAPPING_DEV_UNDERLAY_SETUP" ]]; then
     echo "Developer underlay setup does not exist: $ELEVATION_MAPPING_DEV_UNDERLAY_SETUP" >&2
     exit 2
   fi
-  source "$ELEVATION_MAPPING_DEV_UNDERLAY_SETUP"
+  source_setup "$ELEVATION_MAPPING_DEV_UNDERLAY_SETUP"
 elif [[ -f /home/guanlin/catkin_ws/install/setup.bash ]]; then
-  source /home/guanlin/catkin_ws/install/setup.bash
+  source_setup /home/guanlin/catkin_ws/install/setup.bash
 fi
 
 if ! workspace_setup=$(resolve_workspace_setup); then
   echo "Unable to infer elevation_mapping workspace setup; set ELEVATION_MAPPING_WORKSPACE_SETUP" >&2
   exit 2
 fi
-source "$workspace_setup"
+source_setup "$workspace_setup"
 
 mkdir -p "$OUTPUT_DIR_INPUT"
 OUTPUT_DIR=$(realpath "$OUTPUT_DIR_INPUT")
@@ -115,6 +159,7 @@ done
 MAPPER_PID=
 RECORDER_PID=
 PLAYER_PID=
+POSE_PLAYER_PID=
 STOP_STATUS=0
 
 child_running() {
@@ -174,6 +219,7 @@ cleanup() {
   local status=$?
   trap - EXIT
   stop_child "$PLAYER_PID" INT
+  stop_child "$POSE_PLAYER_PID" INT
   stop_child "$RECORDER_PID" INT
   stop_child "$MAPPER_PID" INT
   exit "$status"
@@ -188,6 +234,7 @@ setsid /usr/bin/time -q -f "%U %S" -o "$MAPPER_TIME" \
   ros2 run elevation_mapping elevation_mapping --ros-args \
   --params-file "$ROBOT_PARAMS" \
   --params-file "$POSTPROCESSOR_PARAMS" \
+  -p "num_callback_threads:=$MAPPER_CALLBACK_THREADS" \
   -p "enable_multimodal_cells:=$FEATURE_ENABLED" \
   >"$OUTPUT_DIR/mapper.log" 2>&1 &
 MAPPER_PID=$!
@@ -217,6 +264,7 @@ subscription_count() {
 deadline=$((SECONDS + 15))
 mapper_ready=false
 recorder_ready=false
+mapper_launched=false
 while (( SECONDS < deadline )); do
   if ! child_running "$MAPPER_PID"; then
     echo "Mapper exited before discovery completed; see mapper.log" >&2
@@ -235,7 +283,11 @@ while (( SECONDS < deadline )); do
   if (( recorder_subscriptions >= 1 )); then
     recorder_ready=true
   fi
-  if [[ "$mapper_ready" == true && "$recorder_ready" == true ]]; then
+  if grep -Fq "$MAPPER_READY_LOG" "$OUTPUT_DIR/mapper.log"; then
+    mapper_launched=true
+  fi
+  if [[ "$mapper_ready" == true && "$recorder_ready" == true &&
+        "$mapper_launched" == true ]]; then
     break
   fi
   sleep 0.2
@@ -249,8 +301,18 @@ if [[ "$recorder_ready" != true ]]; then
   echo "Timed out waiting for recorder /elevation_map_raw_post subscription" >&2
   exit 1
 fi
+if [[ "$mapper_launched" != true ]]; then
+  echo "Timed out waiting for mapper initialization; see mapper.log" >&2
+  exit 1
+fi
 
 setsid ros2 bag play "$BAG" --rate 1.0 \
+  --topics "${POSE_TOPICS[@]}" \
+  >"$OUTPUT_DIR/pose_player.log" 2>&1 &
+POSE_PLAYER_PID=$!
+
+setsid ros2 bag play "$BAG" --rate 1.0 --delay "$POSE_LEAD_SECONDS" \
+  --topics "${CLOUD_TOPICS[@]}" \
   >"$OUTPUT_DIR/player.log" 2>&1 &
 PLAYER_PID=$!
 set +e
@@ -260,6 +322,16 @@ set -e
 PLAYER_PID=
 if (( player_status != 0 )); then
   echo "Bag player failed with exit status $player_status; see player.log" >&2
+  exit 1
+fi
+
+set +e
+wait "$POSE_PLAYER_PID"
+pose_player_status=$?
+set -e
+POSE_PLAYER_PID=
+if (( pose_player_status != 0 )); then
+  echo "Pose bag player failed with exit status $pose_player_status; see pose_player.log" >&2
   exit 1
 fi
 
@@ -274,7 +346,7 @@ fi
 stop_child "$MAPPER_PID" INT
 mapper_status=$STOP_STATUS
 MAPPER_PID=
-if (( mapper_status != 0 && mapper_status != 130 )); then
+if ! mapper_stop_status_is_expected "$mapper_status"; then
   echo "Mapper failed with exit status $mapper_status; see mapper.log" >&2
   exit 1
 fi

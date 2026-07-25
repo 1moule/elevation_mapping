@@ -386,6 +386,21 @@ MultimodalUpdateResult updateMultimodalCell(
       mode.consecutiveObservations = 0;
     }
     expireStaleSecondaryMode(state, timestamp, config);
+    const std::size_t modeCount = countValidModes(state);
+    if (modeCount == 0) {
+      return result;
+    }
+    if (!isModeIndex(state.primaryIndex) ||
+        !state.modes[state.primaryIndex].valid) {
+      state.primaryIndex = state.modes[0].valid ? 0 : 1;
+    }
+    result.handled = true;
+    result.modeCount = modeCount;
+    result.primary = state.modes[state.primaryIndex];
+    if (modeCount == 2) {
+      const int secondaryIndex = state.primaryIndex == 0 ? 1 : 0;
+      result.secondary = state.modes[secondaryIndex];
+    }
     return result;
   }
 
