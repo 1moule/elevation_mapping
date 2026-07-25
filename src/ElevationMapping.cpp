@@ -275,8 +275,17 @@ bool ElevationMapping::readParameters() {
   nodeHandle_->declare_parameter("enable_skip_lower_points", false);
   nodeHandle_->declare_parameter("skip_lower_points_duration", 0.5);
   nodeHandle_->declare_parameter("lower_point_recovery_count", 5);
+  nodeHandle_->declare_parameter("enable_adaptive_lower_surface", false);
+  nodeHandle_->declare_parameter("lower_surface_neighbor_radius", 0.12);
+  nodeHandle_->declare_parameter("lower_surface_min_support", 4);
+  nodeHandle_->declare_parameter("lower_surface_min_candidate_support", 2);
+  nodeHandle_->declare_parameter("lower_surface_recovery_count", 2);
+  nodeHandle_->declare_parameter("lower_surface_height_threshold", 0.05);
+  nodeHandle_->declare_parameter("lower_surface_max_time_gap", 0.25);
   nodeHandle_->declare_parameter("enable_fused_map_hole_filling", false);
   nodeHandle_->declare_parameter("fused_map_hole_filling_radius", 0.08);
+  nodeHandle_->declare_parameter("fused_map_hole_filling_min_support", 4);
+  nodeHandle_->declare_parameter("fused_map_hole_filling_height_threshold", 0.05);
   nodeHandle_->declare_parameter("fusion_height_difference_threshold", 0.08);
   nodeHandle_->declare_parameter("underlying_map_topic", std::string());
   nodeHandle_->declare_parameter("enable_visibility_cleanup", true);
@@ -294,14 +303,45 @@ bool ElevationMapping::readParameters() {
   nodeHandle_->get_parameter("enable_skip_lower_points", map_.enableSkipLowerPoints_);
   nodeHandle_->get_parameter("skip_lower_points_duration", map_.skipLowerPointsDuration_);
   nodeHandle_->get_parameter("lower_point_recovery_count", map_.lowerPointRecoveryCount_);
+  nodeHandle_->get_parameter("enable_adaptive_lower_surface", map_.enableAdaptiveLowerSurface_);
+  nodeHandle_->get_parameter("lower_surface_neighbor_radius", map_.lowerSurfaceNeighborRadius_);
+  nodeHandle_->get_parameter("lower_surface_min_support", map_.lowerSurfaceMinSupport_);
+  nodeHandle_->get_parameter("lower_surface_min_candidate_support", map_.lowerSurfaceMinCandidateSupport_);
+  nodeHandle_->get_parameter("lower_surface_recovery_count", map_.lowerSurfaceRecoveryCount_);
+  nodeHandle_->get_parameter("lower_surface_height_threshold", map_.lowerSurfaceHeightThreshold_);
+  nodeHandle_->get_parameter("lower_surface_max_time_gap", map_.lowerSurfaceMaxTimeGap_);
   nodeHandle_->get_parameter("enable_fused_map_hole_filling", map_.enableFusedMapHoleFilling_);
   nodeHandle_->get_parameter("fused_map_hole_filling_radius", map_.fusedMapHoleFillingRadius_);
+  nodeHandle_->get_parameter("fused_map_hole_filling_min_support", map_.fusedMapHoleFillingMinSupport_);
+  nodeHandle_->get_parameter("fused_map_hole_filling_height_threshold", map_.fusedMapHoleFillingHeightThreshold_);
   nodeHandle_->get_parameter("fusion_height_difference_threshold", map_.fusionHeightDifferenceThreshold_);
   nodeHandle_->get_parameter("underlying_map_topic", map_.underlyingMapTopic_);
   nodeHandle_->get_parameter("enable_visibility_cleanup", map_.enableVisibilityCleanup_);
   nodeHandle_->get_parameter("enable_continuous_cleanup", map_.enableContinuousCleanup_);
   nodeHandle_->get_parameter("scanning_duration", map_.scanningDuration_);
   nodeHandle_->get_parameter("masked_replace_service_mask_layer_name", maskedReplaceServiceMaskLayerName_);
+
+  if (map_.enableAdaptiveLowerSurface_) {
+    const bool validAdaptiveParameters =
+        map_.enableSkipLowerPoints_ && map_.lowerSurfaceNeighborRadius_ > 0.0 &&
+        map_.lowerSurfaceMinSupport_ > 0 && map_.lowerSurfaceMinCandidateSupport_ >= 2 &&
+        map_.lowerSurfaceMinCandidateSupport_ <= map_.lowerSurfaceMinSupport_ &&
+        map_.lowerSurfaceRecoveryCount_ >= 2 && map_.lowerSurfaceHeightThreshold_ >= 0.0 &&
+        map_.lowerSurfaceMaxTimeGap_ > 0.0;
+    if (!validAdaptiveParameters) {
+      RCLCPP_ERROR(nodeHandle_->get_logger(),
+                   "Invalid adaptive lower-surface parameters; disabling adaptive lower-surface recovery.");
+      map_.enableAdaptiveLowerSurface_ = false;
+    }
+  }
+  if (map_.enableFusedMapHoleFilling_ &&
+      (map_.fusedMapHoleFillingRadius_ <= 0.0 ||
+       map_.fusedMapHoleFillingMinSupport_ <= 0 ||
+       map_.fusedMapHoleFillingHeightThreshold_ < 0.0)) {
+    RCLCPP_ERROR(nodeHandle_->get_logger(),
+                 "Invalid fused-map hole-filling parameters; disabling fused-map hole filling.");
+    map_.enableFusedMapHoleFilling_ = false;
+  }
 
   // Settings for initializing elevation map
   nodeHandle_->declare_parameter("initialize_elevation_map", false);

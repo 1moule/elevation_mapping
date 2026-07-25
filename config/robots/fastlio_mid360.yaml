@@ -42,12 +42,21 @@ elevation_mapping:
     fusion_height_difference_threshold: 0.05
     mahalanobis_distance_threshold: 2.0
     multi_height_noise: 0.00001
-    fused_map_publishing_rate: 50.0
+    fused_map_publishing_rate: 20.0
     enable_skip_lower_points: true
     skip_lower_points_duration: 0.8
     lower_point_recovery_count: 8
+    enable_adaptive_lower_surface: true
+    lower_surface_neighbor_radius: 0.12
+    lower_surface_min_support: 4
+    lower_surface_min_candidate_support: 2
+    lower_surface_recovery_count: 2
+    lower_surface_height_threshold: 0.05
+    lower_surface_max_time_gap: 0.25
     enable_fused_map_hole_filling: true
     fused_map_hole_filling_radius: 0.12
+    fused_map_hole_filling_min_support: 4
+    fused_map_hole_filling_height_threshold: 0.05
     scanning_duration: 0.3
     remove_penetrated_points_rate: 5.0
     visibility_cleanup_rate: 2.0

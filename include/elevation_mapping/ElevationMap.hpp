@@ -242,6 +242,7 @@ class ElevationMap {
                           double margin);
 
   friend class ElevationMapping;
+  friend class ElevationMapMixedReturnTest;
 
  private:
   /*!
@@ -333,8 +334,17 @@ class ElevationMap {
   bool enableSkipLowerPoints_;
   double skipLowerPointsDuration_;
   int lowerPointRecoveryCount_;
+  bool enableAdaptiveLowerSurface_;
+  double lowerSurfaceNeighborRadius_;
+  int lowerSurfaceMinSupport_;
+  int lowerSurfaceMinCandidateSupport_;
+  int lowerSurfaceRecoveryCount_;
+  double lowerSurfaceHeightThreshold_;
+  double lowerSurfaceMaxTimeGap_;
   bool enableFusedMapHoleFilling_;
   double fusedMapHoleFillingRadius_;
+  int fusedMapHoleFillingMinSupport_;
+  double fusedMapHoleFillingHeightThreshold_;
   double fusionHeightDifferenceThreshold_;
   std::string underlyingMapTopic_;
   bool enableVisibilityCleanup_;
