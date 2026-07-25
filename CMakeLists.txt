@@ -176,6 +176,12 @@ install(TARGETS
   DESTINATION lib/${PROJECT_NAME}
 )
 
+install(PROGRAMS
+  scripts/analyze_elevation_bag.py
+  scripts/run_elevation_bag_regression.sh
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 # install(
 #   DIRECTORY 
 #     include/${PROJECT_NAME}/
