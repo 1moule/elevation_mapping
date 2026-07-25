@@ -49,15 +49,20 @@ struct ModeLayerNames {
   const char* coverage;
   const char* observations;
   const char* center;
+  const char* sensorX;
+  const char* sensorY;
+  const char* sensorZ;
 };
 
 const std::array<ModeLayerNames, 2> kModeLayers{{
     {"mode0_elevation", "mode0_variance", "mode0_color", "mode0_lowest",
      "mode0_confidence", "mode0_time", "mode0_coverage",
-     "mode0_observations", "mode0_center"},
+     "mode0_observations", "mode0_center", "mode0_sensor_x",
+     "mode0_sensor_y", "mode0_sensor_z"},
     {"mode1_elevation", "mode1_variance", "mode1_color", "mode1_lowest",
      "mode1_confidence", "mode1_time", "mode1_coverage",
-     "mode1_observations", "mode1_center"},
+     "mode1_observations", "mode1_center", "mode1_sensor_x",
+     "mode1_sensor_y", "mode1_sensor_z"},
 }};
 
 constexpr const char* kPrimaryModeIndexLayer = "primary_mode_index";
@@ -86,6 +91,9 @@ void resetModeAt(
   map.at(layers.coverage, index) = 0.0f;
   map.at(layers.observations, index) = 0.0f;
   map.at(layers.center, index) = 0.0f;
+  map.at(layers.sensorX, index) = nan;
+  map.at(layers.sensorY, index) = nan;
+  map.at(layers.sensorZ, index) = nan;
 }
 
 void resetMultimodalStateAt(
@@ -120,6 +128,11 @@ void resetMultimodalState(
 }
 
 void resetRawDiagnostics(grid_map::GridMap& map) {
+  for (const char* layer : kMultimodalDiagnosticLayers) {
+    if (!map.exists(layer)) {
+      map.add(layer);
+    }
+  }
   map["secondary_elevation"].setConstant(
       std::numeric_limits<float>::quiet_NaN());
   map["height_mode_count"].setZero();
@@ -127,6 +140,17 @@ void resetRawDiagnostics(grid_map::GridMap& map) {
       std::numeric_limits<float>::quiet_NaN());
   map["primary_mode_confidence"].setConstant(
       std::numeric_limits<float>::quiet_NaN());
+}
+
+bool hasValidRawMapGeometry(const grid_map::GridMap& map) {
+  const auto& size = map.getSize();
+  const auto& startIndex = map.getStartIndex();
+  return size(0) > 0 && size(1) > 0 &&
+         std::isfinite(map.getResolution()) && map.getResolution() > 0.0 &&
+         map.getLength().allFinite() && (map.getLength() > 0.0).all() &&
+         map.getPosition().allFinite() &&
+         startIndex(0) >= 0 && startIndex(0) < size(0) &&
+         startIndex(1) >= 0 && startIndex(1) < size(1);
 }
 
 void resetRawDiagnostics(
@@ -176,6 +200,9 @@ SurfaceModeState decodeMode(
   mode.consecutiveObservations =
       decodeCount(map.at(layers.observations, index));
   mode.centerOccupied = map.at(layers.center, index) > 0.5f;
+  mode.sensorX = map.at(layers.sensorX, index);
+  mode.sensorY = map.at(layers.sensorY, index);
+  mode.sensorZ = map.at(layers.sensorZ, index);
   return mode;
 }
 
@@ -212,6 +239,9 @@ void encodeMode(
   map.at(layers.observations, index) =
       static_cast<float>(mode.consecutiveObservations);
   map.at(layers.center, index) = mode.centerOccupied ? 1.0f : 0.0f;
+  map.at(layers.sensorX, index) = mode.sensorX;
+  map.at(layers.sensorY, index) = mode.sensorY;
+  map.at(layers.sensorZ, index) = mode.sensorZ;
 }
 
 void encodeMultimodalState(
@@ -264,6 +294,30 @@ void refreshMultimodalDiagnostics(
   modeSeparation = std::fabs(primary.height - secondary.height);
 }
 
+void applyMultimodalPrimary(
+    grid_map::GridMap& rawMap, const grid_map::Index& index,
+    const SurfaceModeState& primary, float minHorizontalVariance,
+    float dynamicTime) {
+  rawMap.at("elevation", index) = primary.height;
+  rawMap.at("variance", index) = primary.variance;
+  rawMap.at("horizontal_variance_x", index) = minHorizontalVariance;
+  rawMap.at("horizontal_variance_y", index) = minHorizontalVariance;
+  rawMap.at("horizontal_variance_xy", index) = 0.0f;
+  rawMap.at("color", index) = primary.color;
+  rawMap.at("time", index) = static_cast<float>(primary.lastSeen);
+  rawMap.at("dynamic_time", index) = dynamicTime;
+  rawMap.at("lowest_scan_point", index) = primary.lowestPointHeight;
+  rawMap.at("sensor_x_at_lowest_scan", index) = primary.sensorX;
+  rawMap.at("sensor_y_at_lowest_scan", index) = primary.sensorY;
+  rawMap.at("sensor_z_at_lowest_scan", index) = primary.sensorZ;
+  rawMap.at("lower_point_height", index) = NAN;
+  rawMap.at("lower_point_time", index) = NAN;
+  rawMap.at("lower_point_count", index) = 0.0f;
+  rawMap.at("adaptive_lower_point_height", index) = NAN;
+  rawMap.at("adaptive_lower_point_time", index) = NAN;
+  rawMap.at("adaptive_lower_point_count", index) = 0.0f;
+}
+
 }  // namespace
 
 ElevationMap::ElevationMap(std::shared_ptr<rclcpp::Node> nodeHandle)
@@ -278,11 +332,13 @@ ElevationMap::ElevationMap(std::shared_ptr<rclcpp::Node> nodeHandle)
       multimodalStateMap_(
           {"mode0_elevation", "mode0_variance", "mode0_color", "mode0_lowest",
            "mode0_confidence", "mode0_time", "mode0_coverage",
-           "mode0_observations", "mode0_center", "mode1_elevation",
-           "mode1_variance", "mode1_color", "mode1_lowest", "mode1_confidence",
-           "mode1_time", "mode1_coverage", "mode1_observations",
-           "mode1_center", "primary_mode_index", "challenger_mode_index",
-           "challenger_count"}),
+           "mode0_observations", "mode0_center", "mode0_sensor_x",
+           "mode0_sensor_y", "mode0_sensor_z", "mode1_elevation",
+           "mode1_variance", "mode1_color", "mode1_lowest",
+           "mode1_confidence", "mode1_time", "mode1_coverage",
+           "mode1_observations", "mode1_center", "mode1_sensor_x",
+           "mode1_sensor_y", "mode1_sensor_z", "primary_mode_index",
+           "challenger_mode_index", "challenger_count"}),
       fusedMap_({"elevation", "upper_bound", "lower_bound", "color",
                  "secondary_elevation", "height_mode_count",
                  "height_mode_separation", "primary_mode_confidence"}),
@@ -361,22 +417,36 @@ bool ElevationMap::add(const PointCloudType::Ptr pointCloud, Eigen::VectorXf& po
   std::vector<std::vector<MultimodalPoint>> pointsByCell;
   std::vector<unsigned char> multimodalHandled;
   std::vector<unsigned char> multimodalExpired;
+  std::vector<unsigned char> multimodalPrimaryUpdates;
   std::vector<MultimodalUpdateResult> multimodalResults;
+  std::vector<std::size_t> activeChallengerKeys;
 
   if (enableMultimodalCells_) {
     pointsByCell.resize(cellCount);
     multimodalHandled.assign(cellCount, 0);
     multimodalExpired.assign(cellCount, 0);
+    multimodalPrimaryUpdates.assign(cellCount, 0);
     multimodalResults.resize(cellCount);
+    activeChallengerKeys.reserve(cellCount);
 
     for (grid_map::GridMapIterator iterator(multimodalStateMap_);
          !iterator.isPastEnd(); ++iterator) {
       auto state = decodeMultimodalState(multimodalStateMap_, *iterator);
+      const std::size_t key = cellKey(*iterator, rawMapSize);
       if (expireStaleModes(
               state, scanTimeSinceInitialization, multimodalConfig_)) {
-        multimodalExpired[cellKey(*iterator, rawMapSize)] = 1;
+        multimodalExpired[key] = 1;
         encodeMultimodalState(multimodalStateMap_, *iterator, state);
         refreshMultimodalDiagnostics(rawMap_, *iterator, state);
+        if (state.primaryIndex >= 0 && state.primaryIndex < 2 &&
+            state.modes[state.primaryIndex].valid) {
+          multimodalPrimaryUpdates[key] = 1;
+          multimodalResults[key].primary = state.modes[state.primaryIndex];
+          multimodalResults[key].modeCount = countValidModes(state);
+        }
+      }
+      if (state.challengerIndex != -1 || state.challengerCount != 0) {
+        activeChallengerKeys.push_back(key);
       }
     }
 
@@ -389,28 +459,54 @@ bool ElevationMap::add(const PointCloudType::Ptr pointCloud, Eigen::VectorXf& po
 
       float color;
       grid_map::colorVectorToValue(point.getRGBVector3i(), color);
-      const float variance = std::clamp(
-          static_cast<float>(pointCloudVariances(i)),
-          static_cast<float>(minVariance_),
+      const float variance = std::min(
+          std::max(
+              static_cast<float>(pointCloudVariances(i)),
+              static_cast<float>(minVariance_)),
           static_cast<float>(maxVariance_));
       pointsByCell[cellKey(index, rawMapSize)].push_back(
           {point.x, point.y, point.z, variance, color});
+    }
+
+    for (const std::size_t key : activeChallengerKeys) {
+      if (!pointsByCell[key].empty()) {
+        continue;
+      }
+      const grid_map::Index index(
+          static_cast<int>(key / static_cast<std::size_t>(rawMapSize(1))),
+          static_cast<int>(key % static_cast<std::size_t>(rawMapSize(1))));
+      auto state = decodeMultimodalState(multimodalStateMap_, index);
+      if (state.challengerIndex != -1 || state.challengerCount != 0) {
+        state.challengerIndex = -1;
+        state.challengerCount = 0;
+        encodeMultimodalState(multimodalStateMap_, index, state);
+      }
     }
 
     for (std::size_t key = 0; key < pointsByCell.size(); ++key) {
       if (pointsByCell[key].empty()) {
         continue;
       }
+      multimodalPrimaryUpdates[key] = 0;
 
       const grid_map::Index index(
           static_cast<int>(key / static_cast<std::size_t>(rawMapSize(1))),
           static_cast<int>(key % static_cast<std::size_t>(rawMapSize(1))));
       grid_map::Position cellCenter;
       rawMap_.getPosition(index, cellCenter);
-      const auto observation = buildCellObservation(
+      auto observation = buildCellObservation(
           pointsByCell[key], static_cast<float>(cellCenter.x()),
           static_cast<float>(cellCenter.y()),
           static_cast<float>(rawMap_.getResolution()), multimodalConfig_);
+      for (std::size_t modeIndex = 0; modeIndex < observation.modeCount;
+           ++modeIndex) {
+        observation.modes[modeIndex].sensorX =
+            static_cast<float>(transformationSensorToMap.translation().x());
+        observation.modes[modeIndex].sensorY =
+            static_cast<float>(transformationSensorToMap.translation().y());
+        observation.modes[modeIndex].sensorZ =
+            static_cast<float>(transformationSensorToMap.translation().z());
+      }
       auto state = decodeMultimodalState(multimodalStateMap_, index);
       if (countValidModes(state) == 0 && multimodalExpired[key] == 0) {
         const float legacyHeight = rawMap_.at("elevation", index);
@@ -452,6 +548,12 @@ bool ElevationMap::add(const PointCloudType::Ptr pointCloud, Eigen::VectorXf& po
           incumbent.coverageBins = 0;
           incumbent.consecutiveObservations = 1;
           incumbent.centerOccupied = false;
+          incumbent.sensorX =
+              rawMap_.at("sensor_x_at_lowest_scan", index);
+          incumbent.sensorY =
+              rawMap_.at("sensor_y_at_lowest_scan", index);
+          incumbent.sensorZ =
+              rawMap_.at("sensor_z_at_lowest_scan", index);
           state.primaryIndex = 0;
         }
       }
@@ -461,6 +563,7 @@ bool ElevationMap::add(const PointCloudType::Ptr pointCloud, Eigen::VectorXf& po
       refreshMultimodalDiagnostics(rawMap_, index, state);
       if (result.handled) {
         multimodalHandled[key] = 1;
+        multimodalPrimaryUpdates[key] = 1;
         multimodalResults[key] = result;
       }
     }
@@ -827,35 +930,18 @@ bool ElevationMap::add(const PointCloudType::Ptr pointCloud, Eigen::VectorXf& po
   }
 
   if (enableMultimodalCells_) {
-    const grid_map::Position3 sensorTranslation(
-        transformationSensorToMap.translation());
-    for (std::size_t key = 0; key < multimodalHandled.size(); ++key) {
-      if (multimodalHandled[key] == 0) {
+    for (std::size_t key = 0; key < multimodalPrimaryUpdates.size(); ++key) {
+      if (multimodalPrimaryUpdates[key] == 0) {
         continue;
       }
 
       const grid_map::Index index(
           static_cast<int>(key / static_cast<std::size_t>(rawMapSize(1))),
           static_cast<int>(key % static_cast<std::size_t>(rawMapSize(1))));
-      const auto& primary = multimodalResults[key].primary;
-      elevationLayer(index(0), index(1)) = primary.height;
-      varianceLayer(index(0), index(1)) = primary.variance;
-      horizontalVarianceXLayer(index(0), index(1)) = minHorizontalVariance_;
-      horizontalVarianceYLayer(index(0), index(1)) = minHorizontalVariance_;
-      horizontalVarianceXYLayer(index(0), index(1)) = 0.0f;
-      colorLayer(index(0), index(1)) = primary.color;
-      timeLayer(index(0), index(1)) = scanTimeSinceInitialization;
-      dynamicTimeLayer(index(0), index(1)) = currentTimeSecondsPattern;
-      lowestScanPointLayer(index(0), index(1)) = primary.lowestPointHeight;
-      sensorXatLowestScanLayer(index(0), index(1)) = sensorTranslation.x();
-      sensorYatLowestScanLayer(index(0), index(1)) = sensorTranslation.y();
-      sensorZatLowestScanLayer(index(0), index(1)) = sensorTranslation.z();
-      lowerPointHeightLayer(index(0), index(1)) = NAN;
-      lowerPointTimeLayer(index(0), index(1)) = NAN;
-      lowerPointCountLayer(index(0), index(1)) = 0.0f;
-      adaptiveLowerPointHeightLayer(index(0), index(1)) = NAN;
-      adaptiveLowerPointTimeLayer(index(0), index(1)) = NAN;
-      adaptiveLowerPointCountLayer(index(0), index(1)) = 0.0f;
+      applyMultimodalPrimary(
+          rawMap_, index, multimodalResults[key].primary,
+          static_cast<float>(minHorizontalVariance_),
+          currentTimeSecondsPattern);
     }
   }
 
@@ -1455,7 +1541,36 @@ grid_map::GridMap& ElevationMap::getRawGridMap() {
 
 void ElevationMap::setRawGridMap(const grid_map::GridMap& map) {
   boost::recursive_mutex::scoped_lock scopedLockForRawData(rawMapMutex_);
-  rawMap_ = map;
+  if (!hasValidRawMapGeometry(map) || !map.exists("elevation") ||
+      !map.exists("variance")) {
+    RCLCPP_ERROR(
+        nodeHandle_->get_logger(),
+        "Refusing raw map replacement with invalid geometry or missing "
+        "elevation/variance layers.");
+    return;
+  }
+
+  grid_map::GridMap replacement = map;
+  resetRawDiagnostics(replacement);
+
+  grid_map::GridMap replacementState(multimodalStateMap_.getLayers());
+  replacementState.setGeometry(
+      replacement.getLength(), replacement.getResolution(),
+      replacement.getPosition());
+  if ((replacementState.getSize() != replacement.getSize()).any()) {
+    RCLCPP_ERROR(
+        nodeHandle_->get_logger(),
+        "Refusing raw map replacement whose geometry cannot be represented by "
+        "the multimodal state grid.");
+    return;
+  }
+  replacementState.setFrameId(replacement.getFrameId());
+  replacementState.setTimestamp(replacement.getTimestamp());
+  replacementState.setStartIndex(replacement.getStartIndex());
+  resetMultimodalState(replacementState);
+
+  rawMap_ = replacement;
+  multimodalStateMap_ = replacementState;
 }
 
 grid_map::GridMap& ElevationMap::getFusedGridMap() {

@@ -393,6 +393,8 @@ MultimodalUpdateResult updateMultimodalCell(
   }
 
   if (observation.modeCount == 0) {
+    state.challengerIndex = -1;
+    state.challengerCount = 0;
     for (auto& mode : state.modes) {
       if (!mode.valid) {
         continue;
@@ -467,6 +469,9 @@ MultimodalUpdateResult updateMultimodalCell(
     mode.lastSeen = timestamp;
     mode.coverageBins = countOccupiedBins(current.xyMask);
     mode.centerOccupied = current.centerOccupied;
+    mode.sensorX = current.sensorX;
+    mode.sensorY = current.sensorY;
+    mode.sensorZ = current.sensorZ;
     mode.consecutiveObservations += 1;
     modeObserved[modeIndex] = true;
   }

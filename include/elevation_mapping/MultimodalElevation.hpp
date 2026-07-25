@@ -33,6 +33,9 @@ struct SurfaceObservation {
   std::size_t pointCount;
   std::uint16_t xyMask;
   bool centerOccupied;
+  float sensorX{std::numeric_limits<float>::quiet_NaN()};
+  float sensorY{std::numeric_limits<float>::quiet_NaN()};
+  float sensorZ{std::numeric_limits<float>::quiet_NaN()};
 };
 
 struct CellObservation {
@@ -51,6 +54,9 @@ struct SurfaceModeState {
   std::size_t coverageBins{0};
   std::size_t consecutiveObservations{0};
   bool centerOccupied{false};
+  float sensorX{std::numeric_limits<float>::quiet_NaN()};
+  float sensorY{std::numeric_limits<float>::quiet_NaN()};
+  float sensorZ{std::numeric_limits<float>::quiet_NaN()};
 };
 
 struct MultimodalCellState {

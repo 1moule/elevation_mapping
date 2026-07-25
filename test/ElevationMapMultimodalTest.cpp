@@ -110,7 +110,9 @@ class ElevationMapMultimodalTest : public testing::Test {
 
   void addScanAtTime(
       const std::vector<TestPoint>& points,
-      const rclcpp::Time& timestamp) {
+      const rclcpp::Time& timestamp,
+      const Eigen::Affine3d& transformationSensorToMap =
+          Eigen::Affine3d::Identity()) {
     PointCloudType::Ptr cloud(new PointCloudType);
     cloud->reserve(points.size());
     for (const auto& source : points) {
@@ -127,12 +129,22 @@ class ElevationMapMultimodalTest : public testing::Test {
     Eigen::VectorXf variances = Eigen::VectorXf::Constant(
         static_cast<Eigen::Index>(points.size()), 1e-4f);
     ASSERT_TRUE(map_.add(
-        cloud, variances, timestamp, Eigen::Affine3d::Identity()));
+        cloud, variances, timestamp, transformationSensorToMap));
   }
 
   void addScan(const std::vector<TestPoint>& points, double seconds) {
     addScanAtTime(
         points, baseTime_ + rclcpp::Duration::from_seconds(seconds));
+  }
+
+  void addScanFromSensor(
+      const std::vector<TestPoint>& points, double seconds,
+      const Eigen::Vector3d& sensorTranslation) {
+    Eigen::Affine3d transformation = Eigen::Affine3d::Identity();
+    transformation.translation() = sensorTranslation;
+    addScanAtTime(
+        points, baseTime_ + rclcpp::Duration::from_seconds(seconds),
+        transformation);
   }
 
   void initializeUpperAndLowerSurfaces() {
@@ -195,6 +207,18 @@ class ElevationMapMultimodalTest : public testing::Test {
     return map_.initialTime_;
   }
 
+  grid_map::GridMap rawMapCopy() const {
+    return map_.rawMap_;
+  }
+
+  const grid_map::GridMap& rawMap() const {
+    return map_.rawMap_;
+  }
+
+  const grid_map::GridMap& multimodalStateMap() const {
+    return map_.multimodalStateMap_;
+  }
+
   std::shared_ptr<rclcpp::Node> node_;
   ElevationMap map_;
   rclcpp::Time baseTime_;
@@ -242,6 +266,22 @@ TEST_F(
       rawValueAt("height_mode_separation", 0.0, 0.0), 0.50f, 0.02f);
   EXPECT_TRUE(
       std::isfinite(rawValueAt("primary_mode_confidence", 0.0, 0.0)));
+}
+
+TEST_F(
+    ElevationMapMultimodalTest,
+    NoPointScanBreaksConsecutiveChallengerWins) {
+  addScan(makeAmbiguousPoints(0.0, 0.0, false), 0.0);
+  ASSERT_NEAR(elevationAtTarget(), -0.30f, 0.02f);
+
+  addAmbiguousScan(/* upperCenterSupported = */ true, 0.1);
+  addScan({}, 0.2);
+  addAmbiguousScan(/* upperCenterSupported = */ true, 0.3);
+  addAmbiguousScan(/* upperCenterSupported = */ true, 0.4);
+
+  EXPECT_NEAR(elevationAtTarget(), -0.30f, 0.02f);
+  addAmbiguousScan(/* upperCenterSupported = */ true, 0.5);
+  EXPECT_NEAR(elevationAtTarget(), 0.20f, 0.02f);
 }
 
 TEST_F(ElevationMapMultimodalTest, UsesLegacyPathWhenFeatureDisabled) {
@@ -363,6 +403,37 @@ TEST_F(ElevationMapMultimodalTest, ExpiresAllStaleModesWithoutPointInCell) {
       std::isnan(rawValueAt("primary_mode_confidence", 0.0, 0.0)));
 }
 
+TEST_F(
+    ElevationMapMultimodalTest,
+    PromotesFreshSecondaryCoherentlyWithoutPointInCell) {
+  addScanFromSensor(
+      makeAmbiguousPoints(0.0, 0.0, false), 0.0,
+      Eigen::Vector3d(1.0, 2.0, 3.0));
+  addScanFromSensor(
+      {{0.0f, 0.0f, 0.20f},
+       {0.018f, 0.0f, 0.20f},
+       {0.0f, 0.018f, 0.20f}},
+      0.4, Eigen::Vector3d(4.0, 5.0, 6.0));
+  addScanFromSensor(
+      {{0.0f, 0.0f, 0.20f}}, 0.45,
+      Eigen::Vector3d(7.0, 8.0, 9.0));
+
+  addScanFromSensor({}, 0.6, Eigen::Vector3d(10.0, 11.0, 12.0));
+
+  EXPECT_NEAR(elevationAtTarget(), 0.20f, 0.02f);
+  EXPECT_FLOAT_EQ(rawValueAt("height_mode_count", 0.0, 0.0), 1.0f);
+  EXPECT_TRUE(std::isnan(secondaryElevationAtTarget()));
+  EXPECT_TRUE(
+      std::isnan(rawValueAt("height_mode_separation", 0.0, 0.0)));
+  EXPECT_TRUE(
+      std::isfinite(rawValueAt("primary_mode_confidence", 0.0, 0.0)));
+  EXPECT_NEAR(rawValueAt("time", 0.0, 0.0), 0.4f, 1e-6f);
+  EXPECT_NEAR(rawValueAt("lowest_scan_point", 0.0, 0.0), 0.23f, 1e-5f);
+  EXPECT_NEAR(rawValueAt("sensor_x_at_lowest_scan", 0.0, 0.0), 4.0f, 1e-6f);
+  EXPECT_NEAR(rawValueAt("sensor_y_at_lowest_scan", 0.0, 0.0), 5.0f, 1e-6f);
+  EXPECT_NEAR(rawValueAt("sensor_z_at_lowest_scan", 0.0, 0.0), 6.0f, 1e-6f);
+}
+
 TEST_F(ElevationMapMultimodalTest, ClearsModeState) {
   initializeTwoModesAt(0.0, 0.0);
   ASSERT_TRUE(map_.clear());
@@ -382,6 +453,78 @@ TEST_F(ElevationMapMultimodalTest, ResetsModeStateWithGeometry) {
   EXPECT_NEAR(elevationAtTarget(), -0.10f, 0.02f);
   EXPECT_TRUE(std::isnan(secondaryElevationAtTarget()));
   EXPECT_FLOAT_EQ(rawValueAt("height_mode_count", 0.0, 0.0), 0.0f);
+}
+
+TEST_F(
+    ElevationMapMultimodalTest,
+    RawMapReplacementAlignsAndResetsStateAtNonzeroStartIndex) {
+  initializeTwoModesAt(0.0, 0.0);
+  grid_map::GridMap replacement = rawMapCopy();
+  std::vector<grid_map::BufferRegion> newRegions;
+  ASSERT_TRUE(
+      replacement.move(grid_map::Position(0.08, 0.04), newRegions));
+  ASSERT_FALSE(replacement.isDefaultStartIndex());
+
+  map_.setRawGridMap(replacement);
+
+  EXPECT_TRUE(
+      (rawMap().getSize() == multimodalStateMap().getSize()).all());
+  EXPECT_TRUE(rawMap().getLength().isApprox(
+      multimodalStateMap().getLength()));
+  EXPECT_TRUE(rawMap().getPosition().isApprox(
+      multimodalStateMap().getPosition()));
+  EXPECT_DOUBLE_EQ(
+      rawMap().getResolution(),
+      multimodalStateMap().getResolution());
+  EXPECT_TRUE(
+      (rawMap().getStartIndex() ==
+       multimodalStateMap().getStartIndex())
+          .all());
+
+  grid_map::Index stateIndex;
+  ASSERT_TRUE(multimodalStateMap().getIndex(
+      grid_map::Position(0.0, 0.0), stateIndex));
+  EXPECT_TRUE(std::isnan(
+      multimodalStateMap().at("mode0_elevation", stateIndex)));
+  EXPECT_TRUE(std::isnan(
+      multimodalStateMap().at("mode1_elevation", stateIndex)));
+  EXPECT_FLOAT_EQ(
+      multimodalStateMap().at("primary_mode_index", stateIndex), -1.0f);
+  EXPECT_FLOAT_EQ(rawValueAt("height_mode_count", 0.0, 0.0), 0.0f);
+}
+
+TEST_F(
+    ElevationMapMultimodalTest,
+    RawMapReplacementAddsDiagnosticsMissingFromPreFeatureMap) {
+  initializeTwoModesAt(0.0, 0.0);
+  grid_map::GridMap preFeatureMap = rawMapCopy();
+  for (const std::string layer :
+       {"secondary_elevation", "height_mode_count",
+        "height_mode_separation", "primary_mode_confidence"}) {
+    ASSERT_TRUE(preFeatureMap.erase(layer));
+  }
+
+  map_.setRawGridMap(preFeatureMap);
+
+  for (const std::string layer :
+       {"secondary_elevation", "height_mode_count",
+        "height_mode_separation", "primary_mode_confidence"}) {
+    ASSERT_TRUE(rawMap().exists(layer)) << layer;
+  }
+  EXPECT_TRUE(std::isnan(secondaryElevationAtTarget()));
+  EXPECT_FLOAT_EQ(rawValueAt("height_mode_count", 0.0, 0.0), 0.0f);
+  EXPECT_TRUE(
+      std::isnan(rawValueAt("height_mode_separation", 0.0, 0.0)));
+  EXPECT_TRUE(
+      std::isnan(rawValueAt("primary_mode_confidence", 0.0, 0.0)));
+
+  grid_map::Index stateIndex;
+  ASSERT_TRUE(multimodalStateMap().getIndex(
+      grid_map::Position(0.0, 0.0), stateIndex));
+  EXPECT_TRUE(std::isnan(
+      multimodalStateMap().at("mode0_elevation", stateIndex)));
+  EXPECT_TRUE(std::isnan(
+      multimodalStateMap().at("mode1_elevation", stateIndex)));
 }
 
 }  // namespace elevation_mapping

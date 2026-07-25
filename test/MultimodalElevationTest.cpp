@@ -277,6 +277,26 @@ TEST(MultimodalSelection, CountsChallengerOncePerTimestamp) {
       updateMultimodalCell(state, challenger, 0.3, config()).primarySwitched);
 }
 
+TEST(MultimodalSelection, ZeroObservationBreaksConsecutiveChallengerWins) {
+  MultimodalCellState state = lowerPrimaryState();
+  const auto challenger = upperCoverageWinner();
+
+  EXPECT_FALSE(
+      updateMultimodalCell(state, challenger, 0.1, config()).primarySwitched);
+  ASSERT_TRUE(
+      updateMultimodalCell(state, observation({}), 0.2, config()).handled);
+  EXPECT_EQ(state.challengerIndex, -1);
+  EXPECT_EQ(state.challengerCount, 0);
+
+  EXPECT_FALSE(
+      updateMultimodalCell(state, challenger, 0.3, config()).primarySwitched);
+  EXPECT_FALSE(
+      updateMultimodalCell(state, challenger, 0.4, config()).primarySwitched);
+  EXPECT_EQ(state.primaryIndex, 0);
+  EXPECT_TRUE(
+      updateMultimodalCell(state, challenger, 0.5, config()).primarySwitched);
+}
+
 TEST(MultimodalSelection, RetainsIncumbentWhenSpatialSupportTies) {
   MultimodalCellState state = lowerPrimaryState();
   auto tieConfig = config();

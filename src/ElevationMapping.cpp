@@ -925,9 +925,14 @@ bool ElevationMapping::loadMapServiceCallback(std::shared_ptr<grid_map_msgs::srv
 
   response->success =
       static_cast<unsigned char>(grid_map::GridMapRosConverter::loadFromBag(request->file_path, topic, map_.getFusedGridMap()));
+  grid_map::GridMap loadedRawMap;
+  const bool rawMapLoaded = grid_map::GridMapRosConverter::loadFromBag(
+      request->file_path + "_raw", topic + "_raw", loadedRawMap);
+  if (rawMapLoaded) {
+    map_.setRawGridMap(loadedRawMap);
+  }
   response->success = static_cast<unsigned char>(
-      grid_map::GridMapRosConverter::loadFromBag(request->file_path + "_raw", topic + "_raw", map_.getRawGridMap()) &&
-      static_cast<bool>(response->success));
+      rawMapLoaded && static_cast<bool>(response->success));
 
   // Update timestamp for visualization in ROS
   map_.setTimestamp(nodeHandle_->get_clock()->now());
