@@ -328,7 +328,8 @@ ElevationMap::ElevationMap(std::shared_ptr<rclcpp::Node> nodeHandle)
   // TODO(max): if (enableVisibilityCleanup_) when parameter cleanup is ready.
   visibilityCleanupMapPublisher_ = nodeHandle_->create_publisher<grid_map_msgs::msg::GridMap>("visibility_cleanup_map", 1);
 
-  initialTime_ = nodeHandle_->get_clock()->now();
+  initialTime_ = rclcpp::Time(
+      0, 0, nodeHandle_->get_clock()->get_clock_type());
 }
 
 ElevationMap::~ElevationMap() = default;
@@ -350,7 +351,7 @@ bool ElevationMap::add(const PointCloudType::Ptr pointCloud, Eigen::VectorXf& po
   boost::recursive_mutex::scoped_lock scopedLockForRawData(rawMapMutex_);
 
   // Update initial time if it is not initialized.
-  if (initialTime_.seconds() == 0) {
+  if (initialTime_.nanoseconds() == 0) {
     initialTime_ = timestamp;
   }
   const float scanTimeSinceInitialization = (timestamp - initialTime_).seconds();
@@ -358,18 +359,21 @@ bool ElevationMap::add(const PointCloudType::Ptr pointCloud, Eigen::VectorXf& po
   const std::size_t cellCount = static_cast<std::size_t>(rawMapSize.prod());
   std::vector<std::vector<MultimodalPoint>> pointsByCell;
   std::vector<unsigned char> multimodalHandled;
+  std::vector<unsigned char> multimodalExpired;
   std::vector<MultimodalUpdateResult> multimodalResults;
 
   if (enableMultimodalCells_) {
     pointsByCell.resize(cellCount);
     multimodalHandled.assign(cellCount, 0);
+    multimodalExpired.assign(cellCount, 0);
     multimodalResults.resize(cellCount);
 
     for (grid_map::GridMapIterator iterator(multimodalStateMap_);
          !iterator.isPastEnd(); ++iterator) {
       auto state = decodeMultimodalState(multimodalStateMap_, *iterator);
-      if (expireStaleSecondaryMode(
+      if (expireStaleModes(
               state, scanTimeSinceInitialization, multimodalConfig_)) {
+        multimodalExpired[cellKey(*iterator, rawMapSize)] = 1;
         encodeMultimodalState(multimodalStateMap_, *iterator, state);
         refreshMultimodalDiagnostics(rawMap_, *iterator, state);
       }
@@ -407,7 +411,7 @@ bool ElevationMap::add(const PointCloudType::Ptr pointCloud, Eigen::VectorXf& po
           static_cast<float>(cellCenter.y()),
           static_cast<float>(rawMap_.getResolution()), multimodalConfig_);
       auto state = decodeMultimodalState(multimodalStateMap_, index);
-      if (countValidModes(state) == 0) {
+      if (countValidModes(state) == 0 && multimodalExpired[key] == 0) {
         const float legacyHeight = rawMap_.at("elevation", index);
         const float legacyVariance = rawMap_.at("variance", index);
         const bool separatedSupportedReturn =
@@ -444,14 +448,9 @@ bool ElevationMap::add(const PointCloudType::Ptr pointCloud, Eigen::VectorXf& po
           }
           incumbent.confidence = 1.0f;
           incumbent.lastSeen = scanTimeSinceInitialization;
-          incumbent.coverageBins =
-              observation.modeCount == 1
-                  ? countOccupiedBins(observation.modes[0].xyMask)
-                  : 0;
+          incumbent.coverageBins = 0;
           incumbent.consecutiveObservations = 1;
-          incumbent.centerOccupied =
-              observation.modeCount == 1 &&
-              observation.modes[0].centerOccupied;
+          incumbent.centerOccupied = false;
           state.primaryIndex = 0;
         }
       }

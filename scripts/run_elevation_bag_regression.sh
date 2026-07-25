@@ -36,7 +36,7 @@ source_setup() {
 
 mapper_stop_status_is_expected() {
   case "$1" in
-    0|130|245)
+    0|130)
       return 0
       ;;
     *)

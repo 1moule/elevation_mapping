@@ -271,6 +271,19 @@ if(BUILD_TESTING)
       include
   )
 
+  ament_add_gtest(test_${PROJECT_NAME}_lifecycle
+    test/ElevationMappingLifecycleTest.cpp
+  )
+
+  target_link_libraries(test_${PROJECT_NAME}_lifecycle
+    ${PROJECT_NAME}_library
+  )
+
+  target_include_directories(test_${PROJECT_NAME}_lifecycle
+    PRIVATE
+      include
+  )
+
 #   # Postprocessor
 #   add_rostest_gtest(test_${PROJECT_NAME}_postprocessor
 #     test/postprocessing/postprocessor.test

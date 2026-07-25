@@ -342,15 +342,15 @@ std::size_t countValidModes(const MultimodalCellState& state) {
   return count;
 }
 
-bool expireStaleSecondaryMode(MultimodalCellState& state, double timestamp,
-                              const MultimodalConfig& config) {
+bool expireStaleModes(MultimodalCellState& state, double timestamp,
+                      const MultimodalConfig& config) {
   if (!isValidMultimodalConfig(config) || !std::isfinite(timestamp)) {
     return false;
   }
 
   bool expired = false;
   for (int index = 0; index < 2; ++index) {
-    if (index == state.primaryIndex || !state.modes[index].valid) {
+    if (!state.modes[index].valid) {
       continue;
     }
     const double lastSeen = state.modes[index].lastSeen;
@@ -359,6 +359,21 @@ bool expireStaleSecondaryMode(MultimodalCellState& state, double timestamp,
       clearChallengerIfNeeded(state, index);
       expired = true;
     }
+  }
+  if (expired &&
+      (!isModeIndex(state.primaryIndex) ||
+       !state.modes[state.primaryIndex].valid)) {
+    state.primaryIndex = -1;
+    for (int index = 0; index < 2; ++index) {
+      if (state.modes[index].valid &&
+          (state.primaryIndex == -1 ||
+           modeHasHigherRank(state.modes[index],
+                             state.modes[state.primaryIndex]))) {
+        state.primaryIndex = index;
+      }
+    }
+    state.challengerIndex = -1;
+    state.challengerCount = 0;
   }
   return expired;
 }
@@ -385,7 +400,7 @@ MultimodalUpdateResult updateMultimodalCell(
       mode.confidence = std::max(0.0f, mode.confidence - 0.25f);
       mode.consecutiveObservations = 0;
     }
-    expireStaleSecondaryMode(state, timestamp, config);
+    expireStaleModes(state, timestamp, config);
     const std::size_t modeCount = countValidModes(state);
     if (modeCount == 0) {
       return result;
@@ -408,7 +423,7 @@ MultimodalUpdateResult updateMultimodalCell(
       state.modes[0].valid && state.modes[0].lastSeen == timestamp,
       state.modes[1].valid && state.modes[1].lastSeen == timestamp,
   };
-  expireStaleSecondaryMode(state, timestamp, config);
+  expireStaleModes(state, timestamp, config);
 
   const ModeAssignment assignment = findBestAssignment(state, observation, config);
   int observationMatches[] = {assignment.observationToMode[0],
@@ -464,7 +479,7 @@ MultimodalUpdateResult updateMultimodalCell(
     mode.confidence = std::max(0.0f, mode.confidence - 0.25f);
     mode.consecutiveObservations = 0;
   }
-  expireStaleSecondaryMode(state, timestamp, config);
+  expireStaleModes(state, timestamp, config);
 
   const std::size_t modeCount = countValidModes(state);
   if (modeCount == 0) {

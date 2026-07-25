@@ -23,6 +23,8 @@ FLAT_HEIGHT_THRESHOLD = 0.05
 RETURN_WINDOW_SECONDS = 1.0
 TRANSITION_MARGIN_METERS = 0.02
 REFERENCE_CELL_SIZE_METERS = 0.04
+# GridMap layers are float32. One micrometer covers a few float32 ULPs at
+# meter-scale elevations without hiding millimeter-scale replay differences.
 COMPARISON_TOLERANCE = 1e-6
 ROI_MIN_FINITE_FRACTION = 0.50
 ROI_MAX_TEMPORAL_SPREAD_METERS = 0.03
@@ -968,18 +970,24 @@ def compare_metric_scope(baseline, candidates, roi_keys=None):
     )
     cpu_increase_ratio = None if cpu_ratio is None else cpu_ratio - 1.0
 
-    determinism_values = [
-        {
-            "edge_transition_width_p95_cells": candidate_width_values[index],
-            "finite_cell_coverage": candidate_coverage_values[index],
-            "flat_variation_p95": candidate_flat_values[index],
-            "frame_count": int(
-                numeric_metric(candidate, "frame_count")
-            ),
-            "vertical_switch_count": candidate_switch_values[index],
-        }
-        for index, candidate in enumerate(candidates)
-    ]
+    if roi_keys is None:
+        determinism_values = [
+            {
+                "edge_transition_width_p95_cells": candidate_width_values[index],
+                "finite_cell_coverage": candidate_coverage_values[index],
+                "flat_variation_p95": candidate_flat_values[index],
+                "frame_count": int(
+                    numeric_metric(candidate, "frame_count")
+                ),
+                "vertical_switch_count": candidate_switch_values[index],
+            }
+            for index, candidate in enumerate(candidates)
+        ]
+    else:
+        determinism_values = [
+            roi_determinism_signature(candidate, roi_keys)
+            for candidate in candidates
+        ]
     determinism_mismatches = []
     for candidate in determinism_values[1:]:
         mismatch = compare_values(determinism_values[0], candidate)
@@ -1262,8 +1270,8 @@ def run_self_test():
     ]
     assert not diagnostics
 
-    diagnostic_only_difference = dict(baseline_metrics)
-    diagnostic_only_difference["cell_statistics_by_key"] = {
+    roi_cell_difference = dict(baseline_metrics)
+    roi_cell_difference["cell_statistics_by_key"] = {
         "1,1": {
             "finite_frame_count": 2,
             "elevation_p05": 0.50,
@@ -1275,9 +1283,29 @@ def run_self_test():
         baseline_metrics,
         [
             baseline_metrics,
-            diagnostic_only_difference,
+            roi_cell_difference,
             baseline_metrics,
         ],
+    )
+    assert not comparison["candidate_runs_identical"]
+    assert diagnostics == [
+        "candidate determinism mismatch: "
+        "$.cell_statistics_by_key.1,1.elevation_p05: 0.5 != 0.0",
+        "candidate_runs_identical must be true",
+    ]
+
+    roi_float_noise = dict(baseline_metrics)
+    roi_float_noise["cell_statistics_by_key"] = {
+        "1,1": {
+            "finite_frame_count": 2,
+            "elevation_p05": 0.5 * COMPARISON_TOLERANCE,
+            "elevation_p50": 0.0,
+            "elevation_p95": 0.0,
+        }
+    }
+    comparison, diagnostics = compare_metrics(
+        baseline_metrics,
+        [baseline_metrics, roi_float_noise, baseline_metrics],
     )
     assert comparison["candidate_runs_identical"]
     assert not diagnostics

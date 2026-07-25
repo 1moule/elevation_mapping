@@ -306,7 +306,8 @@ TEST(MultimodalSelection, RejectsZeroSwitchMarginRatherThanSwitchingOnTie) {
 
 TEST(MultimodalSelection, ExpiresUnobservedSecondaryMode) {
   MultimodalCellState state = twoModeState();
-  EXPECT_TRUE(expireStaleSecondaryMode(state, 0.7, config()));
+  state.modes[state.primaryIndex].lastSeen = 0.3;
+  EXPECT_TRUE(expireStaleModes(state, 0.7, config()));
   EXPECT_TRUE(state.modes[state.primaryIndex].valid);
   EXPECT_EQ(countValidModes(state), 1u);
 }
@@ -357,17 +358,29 @@ TEST(MultimodalSelection, GloballyMatchesAmbiguousObservationsIndependentOfOrder
               ascendingState.modes[1].confidence, 1e-6f);
 }
 
-TEST(MultimodalSelection, EmptyObservationAgesPrimaryAndExpiresSecondary) {
+TEST(MultimodalSelection, EmptyObservationRetainsFreshModes) {
   MultimodalCellState state = twoModeState();
-  const auto result = updateMultimodalCell(state, observation({}), 0.7, config());
+  const auto result = updateMultimodalCell(state, observation({}), 0.4, config());
 
   EXPECT_TRUE(result.handled);
-  EXPECT_EQ(result.modeCount, 1u);
+  EXPECT_EQ(result.modeCount, 2u);
   EXPECT_NEAR(result.primary.height, -0.30f, 1e-6f);
   EXPECT_TRUE(state.modes[0].valid);
   EXPECT_NEAR(state.modes[0].confidence, 0.75f, 1e-6f);
-  EXPECT_FALSE(state.modes[1].valid);
-  EXPECT_EQ(countValidModes(state), 1u);
+  EXPECT_TRUE(state.modes[1].valid);
+  EXPECT_EQ(countValidModes(state), 2u);
+}
+
+TEST(MultimodalSelection, StalePrimaryIsReleased) {
+  MultimodalCellState state = lowerPrimaryState();
+  state.modes[1] = SurfaceModeState{};
+
+  const auto result = updateMultimodalCell(
+      state, observation({}), 0.6, config());
+
+  EXPECT_FALSE(result.handled);
+  EXPECT_EQ(countValidModes(state), 0u);
+  EXPECT_EQ(state.primaryIndex, -1);
 }
 
 TEST(MultimodalSelection, DoesNotHandleSingleModeWithoutExistingState) {
@@ -377,14 +390,6 @@ TEST(MultimodalSelection, DoesNotHandleSingleModeWithoutExistingState) {
 
   EXPECT_FALSE(result.handled);
   EXPECT_EQ(countValidModes(state), 0u);
-}
-
-TEST(MultimodalSelection, DoesNotExpireUnobservedPrimary) {
-  MultimodalCellState state = twoModeState();
-
-  EXPECT_TRUE(expireStaleSecondaryMode(state, 0.7, config()));
-  EXPECT_TRUE(state.modes[state.primaryIndex].valid);
-  EXPECT_NEAR(state.modes[state.primaryIndex].height, -0.30f, 0.01f);
 }
 
 }  // namespace

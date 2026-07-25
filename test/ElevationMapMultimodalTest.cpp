@@ -185,10 +185,22 @@ class ElevationMapMultimodalTest : public testing::Test {
     return rawValueAt("elevation", x, y);
   }
 
+  rclcpp::Time initialTime() const {
+    return map_.initialTime_;
+  }
+
   std::shared_ptr<rclcpp::Node> node_;
   ElevationMap map_;
   rclcpp::Time baseTime_;
 };
+
+TEST_F(ElevationMapMultimodalTest, AnchorsRelativeTimeAtFirstScan) {
+  EXPECT_EQ(initialTime().nanoseconds(), 0);
+
+  addSingleSurfaceScan(-0.10f, 0.0);
+
+  EXPECT_EQ(initialTime().nanoseconds(), baseTime_.nanoseconds());
+}
 
 TEST_F(
     ElevationMapMultimodalTest,
@@ -231,6 +243,23 @@ TEST_F(
 
 TEST_F(
     ElevationMapMultimodalTest,
+    RepeatedSupportedReplacementBecomesPrimaryAfterConfirmations) {
+  configureImmediateLowerPointRecovery();
+  addSingleSurfaceScan(0.20f, 0.0);
+
+  addSingleSurfaceScan(-0.30f, 1.0);
+  EXPECT_NEAR(elevationAtTarget(), 0.20f, 0.02f);
+  addSingleSurfaceScan(-0.30f, 1.1);
+  EXPECT_NEAR(elevationAtTarget(), 0.20f, 0.02f);
+  addSingleSurfaceScan(-0.30f, 1.2);
+
+  EXPECT_NEAR(elevationAtTarget(), -0.30f, 0.02f);
+  EXPECT_NEAR(secondaryElevationAtTarget(), 0.20f, 0.02f);
+  EXPECT_FLOAT_EQ(rawValueAt("height_mode_count", 0.0, 0.0), 2.0f);
+}
+
+TEST_F(
+    ElevationMapMultimodalTest,
     SparseSeparatedReturnDoesNotOverwriteLegacyElevation) {
   configureImmediateLowerPointRecovery();
   addSingleSurfaceScan(0.20f, 0.0);
@@ -239,6 +268,20 @@ TEST_F(
 
   EXPECT_NEAR(elevationAtTarget(), 0.20f, 0.02f);
   EXPECT_FLOAT_EQ(rawValueAt("height_mode_count", 0.0, 0.0), 1.0f);
+}
+
+TEST_F(
+    ElevationMapMultimodalTest,
+    RepeatedUnsupportedReplacementIsReleasedAfterStaleTimeout) {
+  configureImmediateLowerPointRecovery();
+  addSingleSurfaceScan(0.20f, 0.0);
+
+  addScan({{0.0f, 0.0f, -0.30f}}, 1.0);
+  EXPECT_NEAR(elevationAtTarget(), 0.20f, 0.02f);
+  addScan({{0.0f, 0.0f, -0.30f}}, 1.6);
+
+  EXPECT_NEAR(elevationAtTarget(), -0.30f, 0.02f);
+  EXPECT_FLOAT_EQ(rawValueAt("height_mode_count", 0.0, 0.0), 0.0f);
 }
 
 TEST_F(ElevationMapMultimodalTest, FusesMultimodalDiagnosticsFromCenterCell) {
@@ -283,16 +326,16 @@ TEST_F(
   EXPECT_FLOAT_EQ(rawValueAt("height_mode_count", 0.0, 0.0), 2.0f);
 }
 
-TEST_F(ElevationMapMultimodalTest, ExpiresSecondaryWithoutPointInCell) {
+TEST_F(ElevationMapMultimodalTest, ExpiresAllStaleModesWithoutPointInCell) {
   initializeTwoModesAt(0.0, 0.0);
   addScan({}, 0.6);
 
-  EXPECT_FLOAT_EQ(rawValueAt("height_mode_count", 0.0, 0.0), 1.0f);
+  EXPECT_FLOAT_EQ(rawValueAt("height_mode_count", 0.0, 0.0), 0.0f);
   EXPECT_TRUE(std::isnan(secondaryElevationAtTarget()));
   EXPECT_TRUE(
       std::isnan(rawValueAt("height_mode_separation", 0.0, 0.0)));
   EXPECT_TRUE(
-      std::isfinite(rawValueAt("primary_mode_confidence", 0.0, 0.0)));
+      std::isnan(rawValueAt("primary_mode_confidence", 0.0, 0.0)));
 }
 
 TEST_F(ElevationMapMultimodalTest, ClearsModeState) {

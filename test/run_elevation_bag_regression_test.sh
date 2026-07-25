@@ -5,8 +5,16 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPOSITORY_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 RUNNER="$REPOSITORY_ROOT/scripts/run_elevation_bag_regression.sh"
 
-if ! bash "$RUNNER" --check-mapper-stop-status 245; then
-  echo "runner rejected observed post-SIGINT mapper status 245" >&2
+if bash "$RUNNER" --check-mapper-stop-status 245; then
+  echo "runner accepted mapper SIGSEGV status 245" >&2
+  exit 1
+fi
+if ! bash "$RUNNER" --check-mapper-stop-status 0; then
+  echo "runner rejected healthy mapper status 0" >&2
+  exit 1
+fi
+if ! bash "$RUNNER" --check-mapper-stop-status 130; then
+  echo "runner rejected mapper SIGINT status 130" >&2
   exit 1
 fi
 if bash "$RUNNER" --check-mapper-stop-status 1; then

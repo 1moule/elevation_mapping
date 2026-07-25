@@ -77,7 +77,7 @@ MultimodalUpdateResult updateMultimodalCell(
     MultimodalCellState& state, const CellObservation& observation,
     double timestamp, const MultimodalConfig& config);
 std::size_t countValidModes(const MultimodalCellState& state);
-bool expireStaleSecondaryMode(
+bool expireStaleModes(
     MultimodalCellState& state, double timestamp,
     const MultimodalConfig& config);
 

@@ -158,14 +158,18 @@ ElevationMapping::~ElevationMapping() {
     rawSubmapService_.reset();
     fusionTriggerService_.reset();
     fusedSubmapService_.reset();
-    fusedMapPublishTimer_->cancel();
+    if (fusedMapPublishTimer_) {
+      fusedMapPublishTimer_->cancel();
+    }
 
     // fusionServiceQueue_.disable();
     // fusionServiceQueue_.clear();
   }
 
   {  // Visibility cleanup queue
-    visibilityCleanupTimer_->cancel();
+    if (visibilityCleanupTimer_) {
+      visibilityCleanupTimer_->cancel();
+    }
 
     // visibilityCleanupQueue_.disable();
     // visibilityCleanupQueue_.clear();
