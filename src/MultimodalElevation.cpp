@@ -100,7 +100,7 @@ bool hasHigherRank(const ProvisionalGroup& left, const ProvisionalGroup& right) 
 
 bool isValidMultimodalConfig(const MultimodalConfig& config) {
   return std::isfinite(config.modeSeparation) && config.modeSeparation > 0.0f &&
-         config.minPoints > 0 && config.minBins > 0 && config.minBins <= 9 &&
+         config.minPoints >= 3 && config.minBins >= 2 && config.minBins <= 9 &&
          config.switchMarginBins <= 9 && config.switchConfirmations > 0 &&
          std::isfinite(config.staleTimeout) && config.staleTimeout > 0.0;
 }

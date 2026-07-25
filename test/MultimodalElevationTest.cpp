@@ -106,7 +106,16 @@ TEST(MultimodalObservation, RejectsInvalidConfiguration) {
   invalid.modeSeparation = 0.0f;
   invalidConfigs.push_back(invalid);
   invalid = config();
+  invalid.minPoints = 1;
+  invalidConfigs.push_back(invalid);
+  invalid = config();
+  invalid.minPoints = 2;
+  invalidConfigs.push_back(invalid);
+  invalid = config();
   invalid.minPoints = 0;
+  invalidConfigs.push_back(invalid);
+  invalid = config();
+  invalid.minBins = 1;
   invalidConfigs.push_back(invalid);
   invalid = config();
   invalid.minBins = 0;
