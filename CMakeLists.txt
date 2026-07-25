@@ -100,6 +100,7 @@ add_library(${PROJECT_NAME}_library
   src/EdgeAwareMapUtils.cpp
   src/ElevationMapping.cpp
   src/ElevationMap.cpp
+  src/MultimodalElevation.cpp
   src/input_sources/Input.cpp
   src/input_sources/InputSourceManager.cpp
   src/postprocessing/PostprocessorPool.cpp
@@ -251,6 +252,7 @@ if(BUILD_TESTING)
   ament_add_gtest(test_${PROJECT_NAME}_edge_aware_map
     test/EdgeAwareMapUtilsTest.cpp
     test/ElevationMapAdaptiveTest.cpp
+    test/MultimodalElevationTest.cpp
   )
 
   target_link_libraries(test_${PROJECT_NAME}_edge_aware_map
