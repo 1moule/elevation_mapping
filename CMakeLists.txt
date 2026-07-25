@@ -252,6 +252,7 @@ if(BUILD_TESTING)
   ament_add_gtest(test_${PROJECT_NAME}_edge_aware_map
     test/EdgeAwareMapUtilsTest.cpp
     test/ElevationMapAdaptiveTest.cpp
+    test/ElevationMapMultimodalTest.cpp
     test/MultimodalElevationTest.cpp
   )
 
