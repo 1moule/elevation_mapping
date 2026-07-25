@@ -106,8 +106,11 @@ bool updateAdaptiveLowerSurfaceState(AdaptiveLowerSurfaceState& state, float can
 }
 
 bool findEdgeSafeHoleFillSource(const grid_map::GridMap& map, const std::string& layer,
-                                const grid_map::Index& centerIndex, double radius,
-                                double heightThreshold, std::size_t minSupport,
+                                const std::string& modeCountLayer,
+                                const std::string& modeSeparationLayer,
+                                const grid_map::Index& centerIndex,
+                                double radius, double heightThreshold,
+                                std::size_t minSupport,
                                 grid_map::Index& sourceIndex) {
   if (!map.exists(layer) || radius <= 0.0 || heightThreshold < 0.0 || minSupport == 0) {
     return false;
@@ -125,11 +128,19 @@ bool findEdgeSafeHoleFillSource(const grid_map::GridMap& map, const std::string&
   float maxHeight = -std::numeric_limits<float>::infinity();
   std::size_t support = 0;
   std::vector<double> supportAngles;
+  const bool hasModeDiagnostics =
+      map.exists(modeCountLayer) && map.exists(modeSeparationLayer);
 
   for (grid_map::CircleIterator iterator(map, center, radius); !iterator.isPastEnd(); ++iterator) {
     const float height = map.at(layer, *iterator);
     if (!std::isfinite(height)) {
       continue;
+    }
+    if (hasModeDiagnostics &&
+        map.at(modeCountLayer, *iterator) > 1.5f &&
+        map.at(modeSeparationLayer, *iterator) >
+            static_cast<float>(heightThreshold)) {
+      return false;
     }
 
     grid_map::Position neighbor;

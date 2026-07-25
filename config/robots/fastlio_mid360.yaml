@@ -40,6 +40,13 @@ elevation_mapping:
     max_horizontal_variance: 0.005
     edge_aware_fusion: true
     fusion_height_difference_threshold: 0.05
+    enable_multimodal_cells: false
+    multimodal_height_separation: 0.05
+    multimodal_min_points: 3
+    multimodal_min_xy_bins: 2
+    multimodal_switch_margin_bins: 1
+    multimodal_switch_confirmations: 3
+    multimodal_stale_timeout: 0.5
     mahalanobis_distance_threshold: 2.0
     multi_height_noise: 0.00001
     fused_map_publishing_rate: 20.0

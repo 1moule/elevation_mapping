@@ -32,8 +32,11 @@ bool updateAdaptiveLowerSurfaceState(AdaptiveLowerSurfaceState& state, float can
 void resetAdaptiveLowerSurfaceState(AdaptiveLowerSurfaceState& state);
 
 bool findEdgeSafeHoleFillSource(const grid_map::GridMap& map, const std::string& layer,
-                                const grid_map::Index& centerIndex, double radius,
-                                double heightThreshold, std::size_t minSupport,
+                                const std::string& modeCountLayer,
+                                const std::string& modeSeparationLayer,
+                                const grid_map::Index& centerIndex,
+                                double radius, double heightThreshold,
+                                std::size_t minSupport,
                                 grid_map::Index& sourceIndex);
 
 }  // namespace elevation_mapping

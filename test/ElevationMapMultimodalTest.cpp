@@ -26,6 +26,10 @@ std::shared_ptr<rclcpp::Node> makeNode() {
   return node;
 }
 
+MultimodalConfig config() {
+  return MultimodalConfig{};
+}
+
 std::vector<TestPoint> makeAmbiguousPoints(
     double x, double y, bool upperCenterSupported) {
   const auto appendSurface = [x, y](
@@ -59,6 +63,18 @@ std::vector<TestPoint> makeAmbiguousPoints(
 }
 
 }  // namespace
+
+TEST(MultimodalConfig, RejectsUnsafeValues) {
+  auto c = config();
+  c.modeSeparation = 0.0f;
+  EXPECT_FALSE(isValidMultimodalConfig(c));
+  c = config();
+  c.minPoints = 2;
+  EXPECT_FALSE(isValidMultimodalConfig(c));
+  c = config();
+  c.switchConfirmations = 1;
+  EXPECT_FALSE(isValidMultimodalConfig(c));
+}
 
 class ElevationMapMultimodalTest : public testing::Test {
  protected:
@@ -140,6 +156,16 @@ class ElevationMapMultimodalTest : public testing::Test {
     return map_.rawMap_.at(layer, index);
   }
 
+  float fusedValueAt(
+      const std::string& layer, double x, double y) const {
+    grid_map::Index index;
+    if (!map_.fusedMap_.getIndex(grid_map::Position(x, y), index)) {
+      ADD_FAILURE() << "Position is outside fused map.";
+      return std::numeric_limits<float>::quiet_NaN();
+    }
+    return map_.fusedMap_.at(layer, index);
+  }
+
   float elevationAtTarget() const {
     return rawValueAt("elevation", 0.0, 0.0);
   }
@@ -180,6 +206,19 @@ TEST_F(ElevationMapMultimodalTest, UsesLegacyPathWhenFeatureDisabled) {
 
   EXPECT_NEAR(elevationAtTarget(), -0.10f, 0.02f);
   EXPECT_TRUE(std::isnan(secondaryElevationAtTarget()));
+}
+
+TEST_F(ElevationMapMultimodalTest, FusesMultimodalDiagnosticsFromCenterCell) {
+  initializeUpperAndLowerSurfaces();
+
+  ASSERT_TRUE(map_.fuseAll());
+  for (const std::string layer :
+       {"secondary_elevation", "height_mode_count",
+        "height_mode_separation", "primary_mode_confidence"}) {
+    EXPECT_FLOAT_EQ(fusedValueAt(layer, 0.0, 0.0),
+                    rawValueAt(layer, 0.0, 0.0))
+        << layer;
+  }
 }
 
 TEST_F(ElevationMapMultimodalTest, MovesModeStateWithCircularBuffer) {

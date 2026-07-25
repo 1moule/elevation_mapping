@@ -9,6 +9,8 @@
 #define BOOST_BIND_NO_PLACEHOLDERS
 
 #include <cmath>
+#include <cstdint>
+#include <limits>
 #include <string>
 
 #include <grid_map_msgs/msg/grid_map.h>
@@ -272,6 +274,13 @@ bool ElevationMapping::readParameters() {
   nodeHandle_->declare_parameter("min_horizontal_variance", pow(resolution / 2.0, 2));  // two-sigma
   nodeHandle_->declare_parameter("max_horizontal_variance", 0.5);
   nodeHandle_->declare_parameter("edge_aware_fusion", true);
+  nodeHandle_->declare_parameter("enable_multimodal_cells", false);
+  nodeHandle_->declare_parameter("multimodal_height_separation", 0.05);
+  nodeHandle_->declare_parameter("multimodal_min_points", 3);
+  nodeHandle_->declare_parameter("multimodal_min_xy_bins", 2);
+  nodeHandle_->declare_parameter("multimodal_switch_margin_bins", 1);
+  nodeHandle_->declare_parameter("multimodal_switch_confirmations", 3);
+  nodeHandle_->declare_parameter("multimodal_stale_timeout", 0.5);
   nodeHandle_->declare_parameter("enable_skip_lower_points", false);
   nodeHandle_->declare_parameter("skip_lower_points_duration", 0.5);
   nodeHandle_->declare_parameter("lower_point_recovery_count", 5);
@@ -300,6 +309,20 @@ bool ElevationMapping::readParameters() {
   nodeHandle_->get_parameter("min_horizontal_variance", map_.minHorizontalVariance_);  // two-sigma
   nodeHandle_->get_parameter("max_horizontal_variance", map_.maxHorizontalVariance_);
   nodeHandle_->get_parameter("edge_aware_fusion", map_.edgeAwareFusion_);
+  bool enableMultimodalCells;
+  double multimodalHeightSeparation;
+  std::int64_t multimodalMinPoints;
+  std::int64_t multimodalMinXyBins;
+  std::int64_t multimodalSwitchMarginBins;
+  std::int64_t multimodalSwitchConfirmations;
+  double multimodalStaleTimeout;
+  nodeHandle_->get_parameter("enable_multimodal_cells", enableMultimodalCells);
+  nodeHandle_->get_parameter("multimodal_height_separation", multimodalHeightSeparation);
+  nodeHandle_->get_parameter("multimodal_min_points", multimodalMinPoints);
+  nodeHandle_->get_parameter("multimodal_min_xy_bins", multimodalMinXyBins);
+  nodeHandle_->get_parameter("multimodal_switch_margin_bins", multimodalSwitchMarginBins);
+  nodeHandle_->get_parameter("multimodal_switch_confirmations", multimodalSwitchConfirmations);
+  nodeHandle_->get_parameter("multimodal_stale_timeout", multimodalStaleTimeout);
   nodeHandle_->get_parameter("enable_skip_lower_points", map_.enableSkipLowerPoints_);
   nodeHandle_->get_parameter("skip_lower_points_duration", map_.skipLowerPointsDuration_);
   nodeHandle_->get_parameter("lower_point_recovery_count", map_.lowerPointRecoveryCount_);
@@ -320,6 +343,35 @@ bool ElevationMapping::readParameters() {
   nodeHandle_->get_parameter("enable_continuous_cleanup", map_.enableContinuousCleanup_);
   nodeHandle_->get_parameter("scanning_duration", map_.scanningDuration_);
   nodeHandle_->get_parameter("masked_replace_service_mask_layer_name", maskedReplaceServiceMaskLayerName_);
+
+  MultimodalConfig multimodalConfig;
+  multimodalConfig.modeSeparation =
+      static_cast<float>(multimodalHeightSeparation);
+  multimodalConfig.minPoints =
+      static_cast<std::size_t>(multimodalMinPoints);
+  multimodalConfig.minBins =
+      static_cast<std::size_t>(multimodalMinXyBins);
+  multimodalConfig.switchMarginBins =
+      static_cast<std::size_t>(multimodalSwitchMarginBins);
+  multimodalConfig.switchConfirmations =
+      static_cast<int>(multimodalSwitchConfirmations);
+  multimodalConfig.staleTimeout = multimodalStaleTimeout;
+  const bool validMultimodalIntegerParameters =
+      multimodalMinPoints >= 3 &&
+      multimodalMinXyBins >= 2 && multimodalMinXyBins <= 9 &&
+      multimodalSwitchMarginBins >= 1 &&
+      multimodalSwitchMarginBins <= 9 &&
+      multimodalSwitchConfirmations >= 2 &&
+      multimodalSwitchConfirmations <= std::numeric_limits<int>::max();
+  map_.enableMultimodalCells_ = enableMultimodalCells;
+  if (!validMultimodalIntegerParameters ||
+      !isValidMultimodalConfig(multimodalConfig)) {
+    RCLCPP_ERROR(nodeHandle_->get_logger(),
+                 "Invalid multimodal cell parameters; disabling multimodal cells.");
+    map_.enableMultimodalCells_ = false;
+  } else {
+    map_.multimodalConfig_ = multimodalConfig;
+  }
 
   if (map_.enableAdaptiveLowerSurface_) {
     const bool validAdaptiveParameters =

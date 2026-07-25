@@ -63,6 +63,10 @@ const std::array<ModeLayerNames, 2> kModeLayers{{
 constexpr const char* kPrimaryModeIndexLayer = "primary_mode_index";
 constexpr const char* kChallengerModeIndexLayer = "challenger_mode_index";
 constexpr const char* kChallengerCountLayer = "challenger_count";
+constexpr std::array<const char*, 4> kMultimodalDiagnosticLayers{{
+    "secondary_elevation", "height_mode_count", "height_mode_separation",
+    "primary_mode_confidence",
+}};
 
 std::size_t cellKey(
     const grid_map::Index& index, const grid_map::Size& size) {
@@ -279,7 +283,9 @@ ElevationMap::ElevationMap(std::shared_ptr<rclcpp::Node> nodeHandle)
            "mode1_time", "mode1_coverage", "mode1_observations",
            "mode1_center", "primary_mode_index", "challenger_mode_index",
            "challenger_count"}),
-      fusedMap_({"elevation", "upper_bound", "lower_bound", "color"}),
+      fusedMap_({"elevation", "upper_bound", "lower_bound", "color",
+                 "secondary_elevation", "height_mode_count",
+                 "height_mode_separation", "primary_mode_confidence"}),
       // FIXME: Postprocessor num threads should be same as number of filters
       postprocessorPool_(nodeHandle_->get_parameter("postprocessor_num_threads").as_int(), nodeHandle_),
       hasUnderlyingMap_(false),
@@ -981,6 +987,10 @@ bool ElevationMap::fuse(const grid_map::Index& topLeftIndex, const grid_map::Ind
       fusedMap_.at("upper_bound", *areaIterator) =
           rawMapCopy.at("elevation", *areaIterator) + 2.0 * sqrt(rawMapCopy.at("variance", *areaIterator));
       fusedMap_.at("color", *areaIterator) = rawMapCopy.at("color", *areaIterator);
+      for (const auto* layer : kMultimodalDiagnosticLayers) {
+        fusedMap_.at(layer, *areaIterator) =
+            rawMapCopy.at(layer, *areaIterator);
+      }
       continue;
     }
 
@@ -1003,6 +1013,10 @@ bool ElevationMap::fuse(const grid_map::Index& topLeftIndex, const grid_map::Ind
     fusedMap_.at("upper_bound", *areaIterator) = upperBoundDistribution.quantile(0.99);  // TODO(max):
     // TODO(max): Add fusion of colors.
     fusedMap_.at("color", *areaIterator) = rawMapCopy.at("color", *areaIterator);
+    for (const auto* layer : kMultimodalDiagnosticLayers) {
+      fusedMap_.at(layer, *areaIterator) =
+          rawMapCopy.at(layer, *areaIterator);
+    }
   }
 
   fusedMap_.setTimestamp(rawMapCopy.getTimestamp());
@@ -1208,7 +1222,8 @@ void ElevationMap::fillHolesForPublication(grid_map::GridMap& map) const {
     grid_map::Index bestIndex;
     if (fusedMapHoleFillingMinSupport_ <= 0 ||
         !findEdgeSafeHoleFillSource(
-            originalMap, "elevation", index, fusedMapHoleFillingRadius_,
+            originalMap, "elevation", "height_mode_count",
+            "height_mode_separation", index, fusedMapHoleFillingRadius_,
             fusedMapHoleFillingHeightThreshold_,
             static_cast<std::size_t>(fusedMapHoleFillingMinSupport_), bestIndex)) {
       continue;
