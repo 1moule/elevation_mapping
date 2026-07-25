@@ -129,6 +129,129 @@ bool challengerWins(const SurfaceModeState& challenger,
          incumbent.coverageBins + config.switchMarginBins;
 }
 
+bool observationLess(const SurfaceObservation& left,
+                     const SurfaceObservation& right) {
+  if (left.height != right.height) {
+    return left.height < right.height;
+  }
+  if (left.variance != right.variance) {
+    return left.variance < right.variance;
+  }
+  if (left.color != right.color) {
+    return left.color < right.color;
+  }
+  if (left.lowestPointHeight != right.lowestPointHeight) {
+    return left.lowestPointHeight < right.lowestPointHeight;
+  }
+  if (left.pointCount != right.pointCount) {
+    return left.pointCount < right.pointCount;
+  }
+  if (left.xyMask != right.xyMask) {
+    return left.xyMask < right.xyMask;
+  }
+  return left.centerOccupied < right.centerOccupied;
+}
+
+struct ModeAssignment {
+  std::array<int, 2> observationToMode{{-1, -1}};
+  std::size_t matchCount{0};
+  float totalDistance{0.0f};
+};
+
+bool isBetterAssignment(const ModeAssignment& candidate,
+                        const ModeAssignment& best,
+                        const std::array<int, 2>& observationOrder,
+                        std::size_t observationCount) {
+  if (candidate.matchCount != best.matchCount) {
+    return candidate.matchCount > best.matchCount;
+  }
+  if (candidate.totalDistance != best.totalDistance) {
+    return candidate.totalDistance < best.totalDistance;
+  }
+
+  for (std::size_t index = 0; index < observationCount; ++index) {
+    const int observationIndex = observationOrder[index];
+    const int candidateMode = candidate.observationToMode[observationIndex] < 0
+                                  ? 2
+                                  : candidate.observationToMode[observationIndex];
+    const int bestMode = best.observationToMode[observationIndex] < 0
+                             ? 2
+                             : best.observationToMode[observationIndex];
+    if (candidateMode != bestMode) {
+      return candidateMode < bestMode;
+    }
+  }
+  return false;
+}
+
+void findBestAssignment(const MultimodalCellState& state,
+                        const CellObservation& observation,
+                        const MultimodalConfig& config,
+                        const std::array<int, 2>& observationOrder,
+                        std::size_t observationCount,
+                        std::size_t observationPosition,
+                        std::array<bool, 2>& usedModes,
+                        ModeAssignment& candidate, ModeAssignment& best) {
+  if (observationPosition == observationCount) {
+    if (isBetterAssignment(candidate, best, observationOrder, observationCount)) {
+      best = candidate;
+    }
+    return;
+  }
+
+  const int observationIndex = observationOrder[observationPosition];
+  findBestAssignment(state, observation, config, observationOrder,
+                     observationCount, observationPosition + 1, usedModes,
+                     candidate, best);
+
+  for (int modeIndex = 0; modeIndex < 2; ++modeIndex) {
+    if (!state.modes[modeIndex].valid || usedModes[modeIndex]) {
+      continue;
+    }
+    const float distance = std::fabs(
+        state.modes[modeIndex].height - observation.modes[observationIndex].height);
+    if (distance > config.modeSeparation) {
+      continue;
+    }
+
+    usedModes[modeIndex] = true;
+    candidate.observationToMode[observationIndex] = modeIndex;
+    ++candidate.matchCount;
+    candidate.totalDistance += distance;
+    findBestAssignment(state, observation, config, observationOrder,
+                       observationCount, observationPosition + 1, usedModes,
+                       candidate, best);
+    candidate.totalDistance -= distance;
+    --candidate.matchCount;
+    candidate.observationToMode[observationIndex] = -1;
+    usedModes[modeIndex] = false;
+  }
+}
+
+ModeAssignment findBestAssignment(const MultimodalCellState& state,
+                                  const CellObservation& observation,
+                                  const MultimodalConfig& config) {
+  std::array<int, 2> observationOrder{{-1, -1}};
+  std::size_t observationCount = 0;
+  for (std::size_t index = 0; index < observation.modeCount; ++index) {
+    if (isFiniteObservation(observation.modes[index])) {
+      observationOrder[observationCount++] = static_cast<int>(index);
+    }
+  }
+  std::sort(observationOrder.begin(), observationOrder.begin() + observationCount,
+            [&observation](int left, int right) {
+              return observationLess(observation.modes[left],
+                                     observation.modes[right]);
+            });
+
+  ModeAssignment candidate;
+  ModeAssignment best;
+  std::array<bool, 2> usedModes{{false, false}};
+  findBestAssignment(state, observation, config, observationOrder,
+                     observationCount, 0, usedModes, candidate, best);
+  return best;
+}
+
 void clearChallengerIfNeeded(MultimodalCellState& state, int modeIndex) {
   if (state.challengerIndex == modeIndex) {
     state.challengerIndex = -1;
@@ -141,7 +264,8 @@ void clearChallengerIfNeeded(MultimodalCellState& state, int modeIndex) {
 bool isValidMultimodalConfig(const MultimodalConfig& config) {
   return std::isfinite(config.modeSeparation) && config.modeSeparation > 0.0f &&
          config.minPoints >= 3 && config.minBins >= 2 && config.minBins <= 9 &&
-         config.switchMarginBins <= 9 && config.switchConfirmations > 0 &&
+         config.switchMarginBins >= 1 && config.switchMarginBins <= 9 &&
+         config.switchConfirmations > 0 &&
          std::isfinite(config.staleTimeout) && config.staleTimeout > 0.0;
 }
 
@@ -249,8 +373,19 @@ MultimodalUpdateResult updateMultimodalCell(
   }
 
   const std::size_t validBefore = countValidModes(state);
-  if (observation.modeCount == 0 ||
-      (observation.modeCount == 1 && validBefore == 0)) {
+  if (observation.modeCount == 1 && validBefore == 0) {
+    return result;
+  }
+
+  if (observation.modeCount == 0) {
+    for (auto& mode : state.modes) {
+      if (!mode.valid) {
+        continue;
+      }
+      mode.confidence = std::max(0.0f, mode.confidence - 0.25f);
+      mode.consecutiveObservations = 0;
+    }
+    expireStaleSecondaryMode(state, timestamp, config);
     return result;
   }
 
@@ -260,39 +395,10 @@ MultimodalUpdateResult updateMultimodalCell(
   };
   expireStaleSecondaryMode(state, timestamp, config);
 
-  int observationMatches[] = {-1, -1};
+  const ModeAssignment assignment = findBestAssignment(state, observation, config);
+  int observationMatches[] = {assignment.observationToMode[0],
+                              assignment.observationToMode[1]};
   bool modeObserved[] = {false, false};
-  for (std::size_t matchCount = 0; matchCount < observation.modeCount;
-       ++matchCount) {
-    int bestObservation = -1;
-    int bestMode = -1;
-    float bestDistance = std::numeric_limits<float>::infinity();
-    for (std::size_t observationIndex = 0;
-         observationIndex < observation.modeCount; ++observationIndex) {
-      if (observationMatches[observationIndex] != -1 ||
-          !isFiniteObservation(observation.modes[observationIndex])) {
-        continue;
-      }
-      for (int modeIndex = 0; modeIndex < 2; ++modeIndex) {
-        const auto& mode = state.modes[modeIndex];
-        if (!mode.valid || modeObserved[modeIndex]) {
-          continue;
-        }
-        const float distance =
-            std::fabs(mode.height - observation.modes[observationIndex].height);
-        if (distance <= config.modeSeparation && distance < bestDistance) {
-          bestDistance = distance;
-          bestObservation = static_cast<int>(observationIndex);
-          bestMode = modeIndex;
-        }
-      }
-    }
-    if (bestObservation == -1) {
-      break;
-    }
-    observationMatches[bestObservation] = bestMode;
-    modeObserved[bestMode] = true;
-  }
 
   for (std::size_t observationIndex = 0;
        observationIndex < observation.modeCount; ++observationIndex) {

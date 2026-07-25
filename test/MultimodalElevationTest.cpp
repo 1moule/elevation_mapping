@@ -52,6 +52,16 @@ MultimodalCellState twoModeState() {
   return lowerPrimaryState();
 }
 
+MultimodalCellState ambiguousMatchingState() {
+  MultimodalCellState state;
+  state.modes[0] = {true, 0.0625f, 1e-4f, 0.0f, 0.0925f, 1.0f, 0.0,
+                    2u, 1u, false};
+  state.modes[1] = {true, 0.0f, 1e-4f, 0.0f, 0.03f, 1.0f, 0.0,
+                    2u, 1u, false};
+  state.primaryIndex = 1;
+  return state;
+}
+
 CellObservation observationWithCenterOnUpper() {
   return observation({surface(-0.30f, (1u << 0) | (1u << 1), false),
                       surface(0.20f, (1u << 4) | (1u << 5), true)});
@@ -180,6 +190,9 @@ TEST(MultimodalObservation, RejectsInvalidConfiguration) {
   invalid.minBins = 10;
   invalidConfigs.push_back(invalid);
   invalid = config();
+  invalid.switchMarginBins = 0;
+  invalidConfigs.push_back(invalid);
+  invalid = config();
   invalid.switchMarginBins = 10;
   invalidConfigs.push_back(invalid);
   invalid = config();
@@ -266,9 +279,29 @@ TEST(MultimodalSelection, CountsChallengerOncePerTimestamp) {
 
 TEST(MultimodalSelection, RetainsIncumbentWhenSpatialSupportTies) {
   MultimodalCellState state = lowerPrimaryState();
+  auto tieConfig = config();
+  tieConfig.switchMarginBins = 1;
   const auto result = updateMultimodalCell(
-      state, equalCoverageObservation(), 0.1, config());
+      state, equalCoverageObservation(), 0.1, tieConfig);
   EXPECT_NEAR(result.primary.height, -0.30f, 0.01f);
+}
+
+TEST(MultimodalSelection, RejectsZeroSwitchMarginRatherThanSwitchingOnTie) {
+  auto invalidConfig = config();
+  invalidConfig.switchMarginBins = 0;
+  MultimodalCellState state = lowerPrimaryState();
+
+  EXPECT_FALSE(isValidMultimodalConfig(invalidConfig));
+  EXPECT_FALSE(updateMultimodalCell(state, equalCoverageObservation(), 0.1,
+                                    invalidConfig)
+                   .handled);
+  EXPECT_FALSE(updateMultimodalCell(state, equalCoverageObservation(), 0.2,
+                                    invalidConfig)
+                   .handled);
+  EXPECT_FALSE(updateMultimodalCell(state, equalCoverageObservation(), 0.3,
+                                    invalidConfig)
+                   .primarySwitched);
+  EXPECT_EQ(state.primaryIndex, 0);
 }
 
 TEST(MultimodalSelection, ExpiresUnobservedSecondaryMode) {
@@ -292,6 +325,47 @@ TEST(MultimodalSelection, MatchesModesByHeightWhenObservationOrderChanges) {
   EXPECT_NEAR(state.modes[1].height, 0.21f, 0.01f);
   EXPECT_NEAR(state.modes[0].lowestPointHeight, -0.25f, 0.01f);
   EXPECT_NEAR(state.modes[1].lowestPointHeight, 0.25f, 0.01f);
+}
+
+TEST(MultimodalSelection, GloballyMatchesAmbiguousObservationsIndependentOfOrder) {
+  const auto ascending = observation({
+      surface(0.03125f, (1u << 0) | (1u << 1), false),
+      surface(0.09375f, (1u << 7) | (1u << 8), false),
+  });
+  const auto descending = observation({
+      surface(0.09375f, (1u << 7) | (1u << 8), false),
+      surface(0.03125f, (1u << 0) | (1u << 1), false),
+  });
+  MultimodalCellState ascendingState = ambiguousMatchingState();
+  MultimodalCellState descendingState = ambiguousMatchingState();
+
+  ASSERT_TRUE(updateMultimodalCell(ascendingState, ascending, 0.1, config())
+                  .handled);
+  ASSERT_TRUE(updateMultimodalCell(descendingState, descending, 0.1, config())
+                  .handled);
+  EXPECT_NEAR(ascendingState.modes[0].height, 0.078125f, 1e-6f);
+  EXPECT_NEAR(ascendingState.modes[1].height, 0.015625f, 1e-6f);
+  EXPECT_NEAR(descendingState.modes[0].height, ascendingState.modes[0].height,
+              1e-6f);
+  EXPECT_NEAR(descendingState.modes[1].height, ascendingState.modes[1].height,
+              1e-6f);
+  EXPECT_NEAR(ascendingState.modes[0].confidence, 1.0f, 1e-6f);
+  EXPECT_NEAR(ascendingState.modes[1].confidence, 1.0f, 1e-6f);
+  EXPECT_NEAR(descendingState.modes[0].confidence,
+              ascendingState.modes[0].confidence, 1e-6f);
+  EXPECT_NEAR(descendingState.modes[1].confidence,
+              ascendingState.modes[1].confidence, 1e-6f);
+}
+
+TEST(MultimodalSelection, EmptyObservationAgesPrimaryAndExpiresSecondary) {
+  MultimodalCellState state = twoModeState();
+  const auto result = updateMultimodalCell(state, observation({}), 0.7, config());
+
+  EXPECT_FALSE(result.handled);
+  EXPECT_TRUE(state.modes[0].valid);
+  EXPECT_NEAR(state.modes[0].confidence, 0.75f, 1e-6f);
+  EXPECT_FALSE(state.modes[1].valid);
+  EXPECT_EQ(countValidModes(state), 1u);
 }
 
 TEST(MultimodalSelection, DoesNotHandleSingleModeWithoutExistingState) {
