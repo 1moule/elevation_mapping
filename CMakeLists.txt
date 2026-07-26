@@ -102,6 +102,7 @@ add_library(${PROJECT_NAME}_library
   src/ElevationMapping.cpp
   src/ElevationMap.cpp
   src/MultimodalElevation.cpp
+  src/YawAlignedMap.cpp
   src/input_sources/Input.cpp
   src/input_sources/InputSourceManager.cpp
   src/postprocessing/PostprocessorPool.cpp
@@ -268,6 +269,19 @@ if(BUILD_TESTING)
   )
 
   target_include_directories(test_${PROJECT_NAME}_edge_aware_map
+    PRIVATE
+      include
+  )
+
+  ament_add_gtest(test_${PROJECT_NAME}_yaw_aligned_map
+    test/YawAlignedMapTest.cpp
+  )
+
+  target_link_libraries(test_${PROJECT_NAME}_yaw_aligned_map
+    ${PROJECT_NAME}_library
+  )
+
+  target_include_directories(test_${PROJECT_NAME}_yaw_aligned_map
     PRIVATE
       include
   )
