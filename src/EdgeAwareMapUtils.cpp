@@ -124,44 +124,39 @@ bool findEdgeSafeHoleFillSource(const grid_map::GridMap& map, const std::string&
   constexpr double kPi = 3.14159265358979323846;
   const double directionEpsilon = 0.25 * map.getResolution();
   double nearestDistanceSquared = std::numeric_limits<double>::infinity();
-  float minHeight = std::numeric_limits<float>::infinity();
-  float maxHeight = -std::numeric_limits<float>::infinity();
   std::size_t support = 0;
   std::vector<double> supportAngles;
-  const bool hasModeDiagnostics =
-      map.exists(modeCountLayer) && map.exists(modeSeparationLayer);
+  (void)modeCountLayer;
+  (void)modeSeparationLayer;
 
   for (grid_map::CircleIterator iterator(map, center, radius); !iterator.isPastEnd(); ++iterator) {
     const float height = map.at(layer, *iterator);
     if (!std::isfinite(height)) {
       continue;
     }
-    if (hasModeDiagnostics &&
-        map.at(modeCountLayer, *iterator) > 1.5f &&
-        map.at(modeSeparationLayer, *iterator) >
-            static_cast<float>(heightThreshold)) {
-      return false;
-    }
 
     grid_map::Position neighbor;
     map.getPosition(*iterator, neighbor);
     const grid_map::Position offset = neighbor - center;
     const double distanceSquared = offset.squaredNorm();
-    if (distanceSquared < nearestDistanceSquared) {
+    const bool closer = distanceSquared < nearestDistanceSquared;
+    const bool sameDistanceWithLowerIndex =
+        distanceSquared == nearestDistanceSquared &&
+        ((*iterator)(0) < sourceIndex(0) ||
+         ((*iterator)(0) == sourceIndex(0) &&
+          (*iterator)(1) < sourceIndex(1)));
+    if (closer || sameDistanceWithLowerIndex) {
       nearestDistanceSquared = distanceSquared;
       sourceIndex = *iterator;
     }
 
-    minHeight = std::min(minHeight, height);
-    maxHeight = std::max(maxHeight, height);
     ++support;
     if (distanceSquared > directionEpsilon * directionEpsilon) {
       supportAngles.push_back(std::atan2(offset.y(), offset.x()));
     }
   }
 
-  if (support < minSupport || supportAngles.size() < 2 ||
-      maxHeight - minHeight > static_cast<float>(heightThreshold)) {
+  if (support < minSupport || supportAngles.size() < 2) {
     return false;
   }
 

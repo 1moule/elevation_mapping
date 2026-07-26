@@ -109,7 +109,7 @@ TEST(EdgeAwareMapUtils, HoleFillRejectsRotatedOneSidedSupport) {
       center, 0.12, 0.05, 4, source));
 }
 
-TEST(EdgeAwareMapUtils, HoleFillRejectsHeightDiscontinuity) {
+TEST(EdgeAwareMapUtils, HoleFillAcceptsEnclosedHeightDiscontinuity) {
   auto map = makeMap();
   const auto center = indexAt(map, 0.0, 0.0);
   setHeight(map, -0.04, 0.0, 0.20f);
@@ -118,9 +118,10 @@ TEST(EdgeAwareMapUtils, HoleFillRejectsHeightDiscontinuity) {
   setHeight(map, 0.08, 0.0, -0.30f);
 
   grid_map::Index source;
-  EXPECT_FALSE(findEdgeSafeHoleFillSource(
+  ASSERT_TRUE(findEdgeSafeHoleFillSource(
       map, "elevation", "height_mode_count", "height_mode_separation",
       center, 0.12, 0.05, 4, source));
+  EXPECT_TRUE(std::isfinite(map.at("elevation", source)));
 }
 
 TEST(EdgeAwareMapUtils, HoleFillAcceptsSurroundedFlatHole) {
@@ -154,13 +155,13 @@ TEST(EdgeAwareMapUtils, HoleFillWorksAfterCircularBufferMove) {
       center, 0.12, 0.05, 4, source));
 }
 
-TEST(EdgeAwareMapUtils, HoleFillRejectsMultimodalEdgeNeighbors) {
+TEST(EdgeAwareMapUtils, HoleFillAcceptsMultimodalEdgeNeighbors) {
   auto map = makeMapWithModeLayers();
   setSurroundingFlatHeights(map, 0.20f);
   markTwoModes(map, 0.04, 0.0, 0.20f, -0.30f);
 
   grid_map::Index source;
-  EXPECT_FALSE(findEdgeSafeHoleFillSource(
+  EXPECT_TRUE(findEdgeSafeHoleFillSource(
       map, "elevation", "height_mode_count", "height_mode_separation",
       centerIndex(map), 0.12, 0.05, 4, source));
 }
