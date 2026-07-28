@@ -42,16 +42,41 @@ TEST(ScanCellSelectorTest, ChoosesPointNearestCellCenter) {
   EXPECT_EQ(selected.front(), 1u);
 }
 
-TEST(ScanCellSelectorTest, KeepsFirstPointWhenDistancesTie) {
+TEST(ScanCellSelectorTest, SelectsSameTiedPointDataAcrossPermutations) {
   const auto map = makeMap(1.0, 1.0);
-  PointCloudType cloud;
-  cloud.push_back({0.10f, 0.0f, 1.0f});
-  cloud.push_back({-0.10f, 0.0f, 2.0f});
+  const pcl::PointXYZRGBConfidenceRatio preferredPoint(
+      0.10f, 0.0f, 1.0f, 1u, 2u, 3u, 0.5f);
+  const pcl::PointXYZRGBConfidenceRatio otherPoint(
+      -0.10f, 0.0f, 2.0f, 4u, 5u, 6u, 0.25f);
 
-  const auto selected = selectScanCellRepresentatives(map, cloud);
+  PointCloudType firstOrdering;
+  firstOrdering.push_back(otherPoint);
+  firstOrdering.push_back(preferredPoint);
+  PointCloudType secondOrdering;
+  secondOrdering.push_back(preferredPoint);
+  secondOrdering.push_back(otherPoint);
 
-  ASSERT_EQ(selected.size(), 1u);
-  EXPECT_EQ(selected.front(), 0u);
+  const auto firstSelected =
+      selectScanCellRepresentatives(map, firstOrdering);
+  const auto secondSelected =
+      selectScanCellRepresentatives(map, secondOrdering);
+
+  ASSERT_EQ(firstSelected.size(), 1u);
+  ASSERT_EQ(secondSelected.size(), 1u);
+  EXPECT_NE(firstSelected.front(), secondSelected.front());
+
+  const auto& firstPoint = firstOrdering[firstSelected.front()];
+  const auto& secondPoint = secondOrdering[secondSelected.front()];
+  EXPECT_FLOAT_EQ(firstPoint.x, preferredPoint.x);
+  EXPECT_FLOAT_EQ(firstPoint.y, preferredPoint.y);
+  EXPECT_FLOAT_EQ(firstPoint.z, preferredPoint.z);
+  EXPECT_EQ(firstPoint.rgba, preferredPoint.rgba);
+  EXPECT_FLOAT_EQ(firstPoint.confidence_ratio, preferredPoint.confidence_ratio);
+  EXPECT_FLOAT_EQ(secondPoint.x, preferredPoint.x);
+  EXPECT_FLOAT_EQ(secondPoint.y, preferredPoint.y);
+  EXPECT_FLOAT_EQ(secondPoint.z, preferredPoint.z);
+  EXPECT_EQ(secondPoint.rgba, preferredPoint.rgba);
+  EXPECT_FLOAT_EQ(secondPoint.confidence_ratio, preferredPoint.confidence_ratio);
 }
 
 TEST(ScanCellSelectorTest, IgnoresPointsOutsideMap) {

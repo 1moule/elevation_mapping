@@ -70,6 +70,21 @@ TEST(SmallHoleFillerTest, FillsSingleCellHoleWithMedianSupport) {
   EXPECT_FLOAT_EQ(map["lower_bound"](hole(0), hole(1)), -40.0f);
 }
 
+TEST(SmallHoleFillerTest, DefaultConfigurationDoesNotFillEligibleHole) {
+  auto map = makeMap();
+  addCardinalSupport(map);
+
+  const auto hole = indexAt(map, 0.0, 0.0);
+  EXPECT_FALSE(defaultSmallHoleFillingEnabled());
+  EXPECT_EQ(
+      fillSmallElevationHolesIfEnabled(
+          map, defaultSmallHoleFillingEnabled(), defaultParameters()),
+      0u);
+  EXPECT_FALSE(std::isfinite(map["elevation"](hole(0), hole(1))));
+  EXPECT_FALSE(std::isfinite(map["upper_bound"](hole(0), hole(1))));
+  EXPECT_FALSE(std::isfinite(map["lower_bound"](hole(0), hole(1))));
+}
+
 TEST(SmallHoleFillerTest, RejectsComponentLargerThanMaximum) {
   auto map = makeMap();
   addTwoCellHoleSupport(map);

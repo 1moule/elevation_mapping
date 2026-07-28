@@ -88,6 +88,15 @@ float median(std::vector<float> values) {
 
 }  // namespace
 
+std::size_t fillSmallElevationHolesIfEnabled(
+    grid_map::GridMap& map, const bool enabled,
+    const SmallHoleFillingParameters& parameters) {
+  if (!enabled) {
+    return 0u;
+  }
+  return fillSmallElevationHoles(map, parameters);
+}
+
 std::size_t fillSmallElevationHoles(
     grid_map::GridMap& map,
     const SmallHoleFillingParameters& parameters) {

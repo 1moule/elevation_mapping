@@ -12,6 +12,14 @@ struct SmallHoleFillingParameters {
   float maxHeightRange;
 };
 
+constexpr bool defaultSmallHoleFillingEnabled() {
+  return false;
+}
+
+std::size_t fillSmallElevationHolesIfEnabled(
+    grid_map::GridMap& map, bool enabled,
+    const SmallHoleFillingParameters& parameters);
+
 std::size_t fillSmallElevationHoles(
     grid_map::GridMap& map,
     const SmallHoleFillingParameters& parameters);

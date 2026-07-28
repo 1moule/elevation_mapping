@@ -54,9 +54,10 @@ ElevationMap::ElevationMap(std::shared_ptr<rclcpp::Node> nodeHandle)
       enableContinuousCleanup_(false),
       visibilityCleanupDuration_(0.0),
       scanningDuration_(1.0),
-      enableSmallHoleFilling_(true),
+      enableSmallHoleFilling_(defaultSmallHoleFillingEnabled()),
       smallHoleFillingParameters_{4u, 4u, 0.05f} {
-  nodeHandle_->declare_parameter("enable_small_hole_filling", true);
+  nodeHandle_->declare_parameter(
+      "enable_small_hole_filling", defaultSmallHoleFillingEnabled());
   nodeHandle_->declare_parameter("small_hole_max_size", 4);
   nodeHandle_->declare_parameter("small_hole_min_support", 4);
   nodeHandle_->declare_parameter("small_hole_max_height_range", 0.05);
@@ -588,9 +589,8 @@ bool ElevationMap::publishFusedElevationMap() {
   boost::recursive_mutex::scoped_lock scopedLock(fusedMapMutex_);
   grid_map::GridMap fusedMapCopy = fusedMap_;
   scopedLock.unlock();
-  if (enableSmallHoleFilling_) {
-    fillSmallElevationHoles(fusedMapCopy, smallHoleFillingParameters_);
-  }
+  fillSmallElevationHolesIfEnabled(
+      fusedMapCopy, enableSmallHoleFilling_, smallHoleFillingParameters_);
   fusedMapCopy.add("uncertainty_range", fusedMapCopy.get("upper_bound") - fusedMapCopy.get("lower_bound"));
   std::unique_ptr<grid_map_msgs::msg::GridMap> message;
   message = grid_map::GridMapRosConverter::toMessage(fusedMapCopy);
