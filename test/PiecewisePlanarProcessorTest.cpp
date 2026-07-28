@@ -457,19 +457,30 @@ TEST(PiecewisePlanarProcessorTest, InferredCellsDoNotPropagate) {
   EXPECT_FALSE(std::isfinite(output.at("elevation", distantUnknown)));
 }
 
-TEST(PiecewisePlanarProcessorTest, RejectsExactlyCollinearPlaneSupport) {
+TEST(PiecewisePlanarProcessorTest,
+     DisabledDirectionalCompletionPreservesNarrowAcceptedPlane) {
   auto support = makeMap(12, 1);
   addFlatPatch(support, 0, 11, 0, 0, 0.20f);
   auto output = support;
+  auto parameters = defaultParameters();
+  parameters.enableDirectionalGroundCompletion = false;
 
   const auto result = processPiecewisePlanarElevation(
-      support, output, defaultParameters());
+      support, output, parameters);
 
-  EXPECT_EQ(result.acceptedPlanes, 0u);
-  EXPECT_EQ(result.regularizedCells, 0u);
+  EXPECT_EQ(result.acceptedPlanes, 1u);
+  EXPECT_EQ(result.regularizedCells, 12u);
+  for (int x = 0; x < 12; ++x) {
+    EXPECT_NEAR(output.at("elevation", grid_map::Index(x, 0)), 0.20, 1.0e-6);
+    EXPECT_NEAR(output.at("upper_bound", grid_map::Index(x, 0)), 0.23,
+                1.0e-6);
+    EXPECT_NEAR(output.at("lower_bound", grid_map::Index(x, 0)), 0.17,
+                1.0e-6);
+  }
 }
 
-TEST(PiecewisePlanarProcessorTest, RejectsNearCollinearPlaneSupport) {
+TEST(PiecewisePlanarProcessorTest,
+     DisabledDirectionalCompletionPreservesNearCollinearAcceptedPlane) {
   auto support = makeMap(14, 14);
   for (int diagonal = 1; diagonal <= 12; ++diagonal) {
     setSample(support, grid_map::Index(diagonal, diagonal), 0.20f);
@@ -478,12 +489,19 @@ TEST(PiecewisePlanarProcessorTest, RejectsNearCollinearPlaneSupport) {
   auto output = support;
   auto parameters = defaultParameters();
   parameters.minRegionSize = 10u;
+  parameters.enableDirectionalGroundCompletion = false;
 
   const auto result =
       processPiecewisePlanarElevation(support, output, parameters);
 
-  EXPECT_EQ(result.acceptedPlanes, 0u);
-  EXPECT_EQ(result.regularizedCells, 0u);
+  EXPECT_EQ(result.acceptedPlanes, 1u);
+  EXPECT_EQ(result.regularizedCells, 13u);
+  for (int diagonal = 1; diagonal <= 12; ++diagonal) {
+    EXPECT_NEAR(output.at("elevation",
+                          grid_map::Index(diagonal, diagonal)),
+                0.20, 1.0e-6);
+  }
+  EXPECT_NEAR(output.at("elevation", grid_map::Index(6, 7)), 0.20, 1.0e-6);
 }
 
 TEST(PiecewisePlanarProcessorTest,
@@ -507,7 +525,7 @@ TEST(PiecewisePlanarProcessorTest,
 }
 
 TEST(PiecewisePlanarProcessorTest,
-     EqualDistanceTieIsIndependentOfSupportStartIndex) {
+     DisabledDirectionalCompletionPreservesBaseConservativeExactTie) {
   auto canonicalSupport = makeMap(9, 5);
   addFlatPatch(canonicalSupport, 0, 3, 0, 4, 0.0f);
   addFlatPatch(canonicalSupport, 5, 8, 0, 4, 0.30f);
@@ -523,6 +541,7 @@ TEST(PiecewisePlanarProcessorTest,
   auto rolledOutput = rolledSupport;
   auto parameters = occlusionParameters();
   parameters.maxOcclusionDistance = 0.05f;
+  parameters.enableDirectionalGroundCompletion = false;
 
   const auto canonicalResult = processPiecewisePlanarElevation(
       canonicalSupport, canonicalOutput, parameters);
@@ -536,8 +555,8 @@ TEST(PiecewisePlanarProcessorTest,
   ASSERT_TRUE(rolledSupport.getIndex(targetPosition, rolledTarget));
   EXPECT_EQ(canonicalResult.inferredCells, 5u);
   EXPECT_EQ(rolledResult.inferredCells, 5u);
-  EXPECT_FLOAT_EQ(canonicalOutput.at("elevation", canonicalTarget),
-                  rolledOutput.at("elevation", rolledTarget));
+  EXPECT_FLOAT_EQ(canonicalOutput.at("elevation", canonicalTarget), 0.0f);
+  EXPECT_FLOAT_EQ(rolledOutput.at("elevation", rolledTarget), 0.30f);
 }
 
 TEST(PiecewisePlanarProcessorTest, HandlesExtremeFiniteSearchRadius) {
@@ -691,14 +710,24 @@ TEST(PiecewisePlanarProcessorTest,
 
 TEST(PiecewisePlanarProcessorTest,
      DirectionalCompletionDoesNotPropagateInferredCells) {
-  auto support = makeMap(30, 5);
+  auto support = makeMap(60, 5);
   addFlatPatchInRectangle(support, 0.06, 0.18, -0.08, 0.08, 0.30f);
   addFlatPatchInRectangle(support, 0.34, 0.46, -0.08, 0.08, 0.10f);
   auto output = support;
+  addFlatPatchInRectangle(output, 0.62, 0.74, -0.08, 0.08, 0.30f);
+  addFlatPatchInRectangle(output, 0.90, 1.02, -0.08, 0.08, 0.10f);
+
+  const auto outputOnlyHigh = indexAt(output, 0.70, 0.0);
+  const auto outputOnlyLow = indexAt(output, 0.98, 0.0);
+  ASSERT_FALSE(std::isfinite(support.at("elevation", outputOnlyHigh)));
+  ASSERT_FALSE(std::isfinite(support.at("elevation", outputOnlyLow)));
+  ASSERT_TRUE(std::isfinite(output.at("elevation", outputOnlyHigh)));
+  ASSERT_TRUE(std::isfinite(output.at("elevation", outputOnlyLow)));
 
   processPiecewisePlanarElevation(support, output, directionalParameters());
 
-  expectCellsInRectangleInvalid(output, 0.50, 0.58, -0.08, 0.08);
+  expectCellsInRectangleHaveHeight(output, 0.20, 0.32, -0.08, 0.08, 0.10f);
+  expectCellsInRectangleInvalid(output, 0.76, 0.88, -0.08, 0.08);
 }
 
 TEST(PiecewisePlanarProcessorTest,
@@ -837,7 +866,9 @@ TEST(PiecewisePlanarProcessorTest,
   const auto noisyHighSample = indexAt(support, 0.10, 0.0);
   setSample(support, noisyHighSample, 0.32f);
   const std::vector<float> invalidWidths{
-      std::numeric_limits<float>::quiet_NaN(), 0.0f, -0.40f};
+      std::numeric_limits<float>::quiet_NaN(),
+      std::numeric_limits<float>::infinity(),
+      -std::numeric_limits<float>::infinity(), 0.0f, -0.40f};
 
   for (const float invalidWidth : invalidWidths) {
     auto output = support;
@@ -860,7 +891,9 @@ TEST(PiecewisePlanarProcessorTest,
   addFlatPatch(support, 0, 3, 0, 4, 0.0f);
   addFlatPatch(support, 6, 9, 0, 4, 0.30f);
   const std::vector<float> invalidWidths{
-      std::numeric_limits<float>::quiet_NaN(), 0.0f, -0.40f};
+      std::numeric_limits<float>::quiet_NaN(),
+      std::numeric_limits<float>::infinity(),
+      -std::numeric_limits<float>::infinity(), 0.0f, -0.40f};
 
   for (const float invalidWidth : invalidWidths) {
     auto output = support;

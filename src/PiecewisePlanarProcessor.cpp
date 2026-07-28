@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <iterator>
 #include <map>
 #include <set>
 #include <utility>
@@ -32,14 +31,18 @@ struct Plane {
 
 struct AcceptedPlane {
   std::size_t regionId;
+  std::size_t directionalPlaneId;
+  bool directionalEligible;
   Plane plane;
   std::vector<SupportCell> cells;
 };
 
 struct PlaneCandidate {
   std::size_t planeId;
+  std::size_t directionalPlaneId;
   std::size_t consistentSupportCount;
   double nearestSquaredDistance;
+  double directionalNearestSquaredDistance;
   grid_map::Position nearestSupportPosition;
   float predictedHeight;
 };
@@ -82,6 +85,13 @@ bool hasValidParameters(const PiecewisePlanarParameters& parameters) {
          parameters.maxOcclusionDistance > 0.0f &&
          std::isfinite(parameters.inferredHalfRange) &&
          parameters.inferredHalfRange > 0.0f;
+}
+
+bool hasValidDirectionalConfiguration(
+    const PiecewisePlanarParameters& parameters) {
+  return parameters.enableDirectionalGroundCompletion &&
+         std::isfinite(parameters.directionalGroundMaxGapWidth) &&
+         parameters.directionalGroundMaxGapWidth > 0.0f;
 }
 
 std::vector<grid_map::Index> getNeighbors(const grid_map::GridMap& map,
@@ -159,48 +169,47 @@ bool hasSufficientTwoDimensionalSpan(
          kMinimumVarianceInResolutionSquared * resolution * resolution;
 }
 
-bool solveWeightedPlane(const std::vector<SupportCell>& cells,
-                        const std::vector<double>& weights,
-                        const Eigen::Vector2d& centroid,
-                        Eigen::Vector3d& coefficients) {
-  Eigen::MatrixXd weightedDesign(cells.size(), 3);
-  Eigen::VectorXd weightedElevation(cells.size());
-  for (std::size_t index = 0u; index < cells.size(); ++index) {
-    const auto& cell = cells[index];
-    const double squareRootWeight = std::sqrt(weights[index]);
-    weightedDesign.row(index) =
-        squareRootWeight *
-        Eigen::RowVector3d(cell.x - centroid.x(),
-                           cell.y - centroid.y(), 1.0);
-    weightedElevation(index) = squareRootWeight * cell.elevation;
-  }
-
-  const Eigen::ColPivHouseholderQR<Eigen::MatrixXd> decomposition(
-      weightedDesign);
-  if (decomposition.rank() != 3) {
-    return false;
-  }
-  const Eigen::Vector3d centeredCoefficients =
-      decomposition.solve(weightedElevation);
-  if (!centeredCoefficients.allFinite()) {
-    return false;
-  }
-  coefficients(0) = centeredCoefficients(0);
-  coefficients(1) = centeredCoefficients(1);
-  coefficients(2) = centeredCoefficients(2) -
-                    centeredCoefficients(0) * centroid.x() -
-                    centeredCoefficients(1) * centroid.y();
-  return coefficients.allFinite();
-}
-
-bool fitPlane(const std::vector<SupportCell>& cells, const double resolution,
-              Plane& plane) {
+bool isDirectionalPlaneEligible(const std::vector<SupportCell>& cells,
+                                const double resolution) {
   const Eigen::Vector2d centroid = supportCentroid(cells);
   if (!hasSufficientTwoDimensionalSpan(cells, resolution, centroid)) {
     return false;
   }
+
+  Eigen::MatrixXd centeredDesign(cells.size(), 3);
+  for (std::size_t index = 0u; index < cells.size(); ++index) {
+    centeredDesign.row(index) =
+        Eigen::RowVector3d(cells[index].x - centroid.x(),
+                           cells[index].y - centroid.y(), 1.0);
+  }
+  const Eigen::ColPivHouseholderQR<Eigen::MatrixXd> decomposition(
+      centeredDesign);
+  return decomposition.rank() == 3;
+}
+
+bool solveWeightedPlane(const std::vector<SupportCell>& cells,
+                        const std::vector<double>& weights,
+                        Eigen::Vector3d& coefficients) {
+  Eigen::Matrix3d normalMatrix = Eigen::Matrix3d::Zero();
+  Eigen::Vector3d rightHandSide = Eigen::Vector3d::Zero();
+  for (std::size_t index = 0u; index < cells.size(); ++index) {
+    const auto& cell = cells[index];
+    const Eigen::Vector3d row(cell.x, cell.y, 1.0);
+    normalMatrix.noalias() += weights[index] * row * row.transpose();
+    rightHandSide.noalias() += weights[index] * row * cell.elevation;
+  }
+
+  const Eigen::LDLT<Eigen::Matrix3d> decomposition(normalMatrix);
+  if (decomposition.info() != Eigen::Success) {
+    return false;
+  }
+  coefficients = decomposition.solve(rightHandSide);
+  return decomposition.info() == Eigen::Success && coefficients.allFinite();
+}
+
+bool fitPlane(const std::vector<SupportCell>& cells, Plane& plane) {
   std::vector<double> weights(cells.size(), 1.0);
-  if (!solveWeightedPlane(cells, weights, centroid, plane.coefficients)) {
+  if (!solveWeightedPlane(cells, weights, plane.coefficients)) {
     return false;
   }
 
@@ -216,7 +225,7 @@ bool fitPlane(const std::vector<SupportCell>& cells, const double resolution,
       const double absoluteResidual = std::abs(cell.elevation - prediction);
       weights[index] = absoluteResidual <= cutoff ? 1.0 : cutoff / absoluteResidual;
     }
-    if (!solveWeightedPlane(cells, weights, centroid, plane.coefficients)) {
+    if (!solveWeightedPlane(cells, weights, plane.coefficients)) {
       return false;
     }
   }
@@ -298,14 +307,23 @@ std::vector<AcceptedPlane> findAcceptedPlanes(
       region.push_back(supportCells[index]);
     }
     Plane plane;
-    if (fitPlane(region, supportMap.getResolution(), plane) &&
+    if (fitPlane(region, plane) &&
         plane.residualMad <= parameters.maxRegionMad) {
-      acceptedPlanes.push_back({regionId, plane, std::move(region)});
+      const bool directionalEligible =
+          hasValidDirectionalConfiguration(parameters) &&
+          isDirectionalPlaneEligible(region, supportMap.getResolution());
+      acceptedPlanes.push_back(
+          {regionId, 0u, directionalEligible, plane, std::move(region)});
     }
     ++regionId;
   }
 
-  const auto canonicalCell = [](const AcceptedPlane& accepted) {
+  if (!hasValidDirectionalConfiguration(parameters)) {
+    return acceptedPlanes;
+  }
+
+  const auto canonicalCell = [&acceptedPlanes](const std::size_t planeIndex) {
+    const auto& accepted = acceptedPlanes[planeIndex];
     return std::min_element(
         accepted.cells.begin(), accepted.cells.end(),
         [](const SupportCell& first, const SupportCell& second) {
@@ -313,17 +331,25 @@ std::vector<AcceptedPlane> findAcceptedPlanes(
                  (first.x == second.x && first.y < second.y);
         });
   };
-  std::sort(acceptedPlanes.begin(), acceptedPlanes.end(),
-            [&canonicalCell](const AcceptedPlane& first,
-                             const AcceptedPlane& second) {
+  std::vector<std::size_t> directionalOrder;
+  directionalOrder.reserve(acceptedPlanes.size());
+  for (std::size_t planeIndex = 0u; planeIndex < acceptedPlanes.size();
+       ++planeIndex) {
+    directionalOrder.push_back(planeIndex);
+  }
+  std::sort(directionalOrder.begin(), directionalOrder.end(),
+            [&canonicalCell](const std::size_t first,
+                             const std::size_t second) {
               const auto firstCell = canonicalCell(first);
               const auto secondCell = canonicalCell(second);
               return firstCell->x < secondCell->x ||
                      (firstCell->x == secondCell->x &&
                       firstCell->y < secondCell->y);
             });
-  for (std::size_t planeId = 0u; planeId < acceptedPlanes.size(); ++planeId) {
-    acceptedPlanes[planeId].regionId = planeId;
+  for (std::size_t directionalPlaneId = 0u;
+       directionalPlaneId < directionalOrder.size(); ++directionalPlaneId) {
+    acceptedPlanes[directionalOrder[directionalPlaneId]].directionalPlaneId =
+        directionalPlaneId;
   }
   return acceptedPlanes;
 }
@@ -348,6 +374,25 @@ Eigen::MatrixXi buildSupportPlaneIds(
         supportPlaneIds(cell.index(0), cell.index(1)) =
             static_cast<int>(planeIndex);
       }
+    }
+  }
+  return supportPlaneIds;
+}
+
+Eigen::MatrixXi buildDirectionalSupportPlaneIds(
+    const grid_map::GridMap& supportMap,
+    const std::vector<AcceptedPlane>& acceptedPlanes,
+    const PiecewisePlanarParameters& parameters) {
+  Eigen::MatrixXi supportPlaneIds =
+      buildSupportPlaneIds(supportMap, acceptedPlanes, parameters);
+  for (std::size_t planeIndex = 0u; planeIndex < acceptedPlanes.size();
+       ++planeIndex) {
+    const auto& accepted = acceptedPlanes[planeIndex];
+    if (accepted.directionalEligible) {
+      continue;
+    }
+    for (const auto& cell : accepted.cells) {
+      supportPlaneIds(cell.index(0), cell.index(1)) = -1;
     }
   }
   return supportPlaneIds;
@@ -421,16 +466,20 @@ std::vector<PlaneCandidate> findEligibleCandidates(
     if (found == candidatesByPlane.end()) {
       candidatesByPlane.emplace(
           stablePlaneIndex,
-          PlaneCandidate{acceptedPlanes[stablePlaneIndex].regionId, 1u,
-                         squaredDistance, supportPosition, 0.0f});
+          PlaneCandidate{acceptedPlanes[stablePlaneIndex].regionId,
+                         acceptedPlanes[stablePlaneIndex].directionalPlaneId,
+                         1u, offset.squaredDistance, squaredDistance,
+                         supportPosition, 0.0f});
       continue;
     }
     ++found->second.consistentSupportCount;
-    if (squaredDistance < found->second.nearestSquaredDistance ||
-        (squaredDistance == found->second.nearestSquaredDistance &&
+    found->second.nearestSquaredDistance = std::min(
+        found->second.nearestSquaredDistance, offset.squaredDistance);
+    if (squaredDistance < found->second.directionalNearestSquaredDistance ||
+        (squaredDistance == found->second.directionalNearestSquaredDistance &&
          isLexicographicallySmaller(supportPosition,
                                     found->second.nearestSupportPosition))) {
-      found->second.nearestSquaredDistance = squaredDistance;
+      found->second.directionalNearestSquaredDistance = squaredDistance;
       found->second.nearestSupportPosition = supportPosition;
     }
   }
@@ -549,14 +598,12 @@ void completeDirectionalGroundGaps(
     const std::vector<AcceptedPlane>& acceptedPlanes,
     const PiecewisePlanarParameters& parameters,
     std::set<IndexKey>& inferredSupportIndices) {
-  if (!parameters.enableDirectionalGroundCompletion ||
-      !std::isfinite(parameters.directionalGroundMaxGapWidth) ||
-      parameters.directionalGroundMaxGapWidth <= 0.0f) {
+  if (!hasValidDirectionalConfiguration(parameters)) {
     return;
   }
 
   const Eigen::MatrixXi supportPlaneIds =
-      buildSupportPlaneIds(supportMap, acceptedPlanes, parameters);
+      buildDirectionalSupportPlaneIds(supportMap, acceptedPlanes, parameters);
   const auto offsets = buildSearchOffsets(
       supportMap, parameters.directionalGroundMaxGapWidth);
   const grid_map::Position observer = supportMap.getPosition();
@@ -616,13 +663,17 @@ void completeDirectionalGroundGaps(
           continue;
         }
 
-        const double distance = std::sqrt(high.nearestSquaredDistance) +
-                                std::sqrt(low.nearestSquaredDistance);
+        const double distance =
+            std::sqrt(high.directionalNearestSquaredDistance) +
+            std::sqrt(low.directionalNearestSquaredDistance);
         if (selectedHigh == nullptr || distance < selectedDistance ||
             (distance == selectedDistance &&
-             (high.planeId < selectedHigh->planeId ||
-              (high.planeId == selectedHigh->planeId &&
-               low.planeId < selectedLow->planeId)))) {
+             (high.directionalPlaneId <
+                  selectedHigh->directionalPlaneId ||
+              (high.directionalPlaneId ==
+                   selectedHigh->directionalPlaneId &&
+               low.directionalPlaneId <
+                   selectedLow->directionalPlaneId)))) {
           selectedHigh = &high;
           selectedLow = &low;
           selectedDistance = distance;
