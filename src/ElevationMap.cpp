@@ -16,6 +16,7 @@
 #include "elevation_mapping/ElevationMap.hpp"
 #include "elevation_mapping/ElevationMapFunctors.hpp"
 #include "elevation_mapping/PointXYZRGBConfidenceRatio.hpp"
+#include "elevation_mapping/ScanCellSelector.hpp"
 #include "elevation_mapping/WeightedEmpiricalCumulativeDistributionFunction.hpp"
 
 namespace {
@@ -110,7 +111,9 @@ bool ElevationMap::add(const PointCloudType::Ptr pointCloud, Eigen::VectorXf& po
     basicLayers_.push_back(rawMap_.get(layer));
   }
 
-  for (unsigned int i = 0; i < pointCloud->size(); ++i) {
+  const auto selectedPointIndices =
+      selectScanCellRepresentatives(rawMap_, *pointCloud);
+  for (const auto i : selectedPointIndices) {
     auto& point = pointCloud->points[i];
     grid_map::Index index;
     grid_map::Position position(point.x, point.y);  // NOLINT(cppcoreguidelines-pro-type-union-access)
@@ -132,7 +135,8 @@ bool ElevationMap::add(const PointCloudType::Ptr pointCloud, Eigen::VectorXf& po
     auto& sensorYatLowestScan = sensorYatLowestScanLayer(index(0), index(1));
     auto& sensorZatLowestScan = sensorZatLowestScanLayer(index(0), index(1));
 
-    const float& pointVariance = 1e-11 * pointCloudVariances(i);
+    const float pointVariance =
+        sanitizePointVariance(pointCloudVariances(i), minVariance_);
     bool isValid = std::all_of(basicLayers_.begin(), basicLayers_.end(),
                                [&](Eigen::Ref<const grid_map::Matrix> layer) { 
                                 return std::isfinite(layer(index(0), index(1))); });

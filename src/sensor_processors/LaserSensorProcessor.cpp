@@ -58,7 +58,7 @@ bool LaserSensorProcessor::computeVariances(const PointCloudType::ConstPtr point
 
   // Sensor Jacobian (J_s).
   const Eigen::RowVector3f sensorJacobian =
-      projectionVector * (rotationMapToBase_ * rotationBaseToSensor_.transposed()).toImplementation().cast<float>();
+      projectionVector * (rotationMapToBase_.transposed() * rotationBaseToSensor_.transposed()).toImplementation().cast<float>();
 
   // Robot rotation covariance matrix (Sigma_q).
   Eigen::Matrix3f rotationVariance = robotPoseCovariance.bottomRightCorner(3, 3).cast<float>();

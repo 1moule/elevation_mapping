@@ -99,6 +99,7 @@ ament_target_dependencies(${PROJECT_NAME}_pcl_types
 add_library(${PROJECT_NAME}_library
   src/ElevationMapping.cpp
   src/ElevationMap.cpp
+  src/ScanCellSelector.cpp
   src/input_sources/Input.cpp
   src/input_sources/InputSourceManager.cpp
   src/postprocessing/PostprocessorPool.cpp
@@ -245,6 +246,19 @@ if(BUILD_TESTING)
   target_include_directories(test_${PROJECT_NAME}_input_sources SYSTEM PUBLIC
     ${Boost_INCLUDE_DIRS}
     ${Eigen_INCLUDE_DIRS}
+  )
+
+  ament_add_gtest(test_scan_cell_selector
+    test/ScanCellSelectorTest.cpp
+  )
+
+  target_link_libraries(test_scan_cell_selector
+    ${PROJECT_NAME}_library
+  )
+
+  target_include_directories(test_scan_cell_selector
+    PRIVATE
+      include
   )
 
 #   # Postprocessor
