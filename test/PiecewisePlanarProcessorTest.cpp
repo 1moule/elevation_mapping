@@ -1,4 +1,5 @@
 #include "elevation_mapping/PiecewisePlanarProcessor.hpp"
+#include "elevation_mapping/SmallHoleFiller.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -221,6 +222,36 @@ TEST(PiecewisePlanarProcessorTest, DoesNotModifySupportMap) {
   processPiecewisePlanarElevation(support, output, defaultParameters());
 
   expectMapEqual(before, support);
+}
+
+TEST(PiecewisePlanarProcessorTest,
+     UsesPreHoleFillSupportForOcclusionCompletion) {
+  auto support = makeMap(5, 5);
+  addFlatPatch(support, 0, 1, 0, 4, 0.0f);
+  addFlatPatch(support, 3, 4, 0, 4, 0.05f);
+  setSample(support, grid_map::Index(2, 0), 0.025f);
+  setSample(support, grid_map::Index(2, 1), 0.025f);
+  setSample(support, grid_map::Index(2, 3), 0.025f);
+  setSample(support, grid_map::Index(2, 4), 0.025f);
+  auto output = support;
+  const auto planarSupport = output;
+  const grid_map::Index hole(2, 2);
+
+  SmallHoleFillingParameters holeParameters{1u, 4u, 0.05f};
+  EXPECT_EQ(fillSmallElevationHoles(output, holeParameters), 1u);
+  EXPECT_NEAR(output.at("elevation", hole), 0.025, 1.0e-5);
+
+  auto parameters = occlusionParameters();
+  parameters.minRegionSize = 4u;
+  parameters.neighborHeightTolerance = 0.01f;
+  parameters.maxOcclusionDistance = 0.05f;
+  parameters.minOcclusionSupport = 1u;
+  const auto result = processPiecewisePlanarElevation(
+      planarSupport, output, parameters);
+
+  EXPECT_EQ(result.inferredCells, 1u);
+  expectInferredCellAtOneOfHeights(output, hole, 0.0f, 0.05f);
+  EXPECT_FALSE(std::isfinite(planarSupport.at("elevation", hole)));
 }
 
 TEST(PiecewisePlanarProcessorTest,

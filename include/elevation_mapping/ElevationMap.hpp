@@ -26,6 +26,7 @@
 
 // Elevation Mapping
 #include "elevation_mapping/PointXYZRGBConfidenceRatio.hpp"
+#include "elevation_mapping/PiecewisePlanarProcessor.hpp"
 #include "elevation_mapping/postprocessing/PostprocessorPool.hpp"
 #include "elevation_mapping/SmallHoleFiller.hpp"
 
@@ -331,6 +332,8 @@ class ElevationMap {
   double scanningDuration_;
   bool enableSmallHoleFilling_;
   SmallHoleFillingParameters smallHoleFillingParameters_;
+  bool enablePiecewisePlanarRegularization_;
+  PiecewisePlanarParameters piecewisePlanarParameters_;
 };
 
 }  // namespace elevation_mapping

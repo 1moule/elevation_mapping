@@ -49,6 +49,14 @@ elevation_mapping:
     small_hole_max_size: 4
     small_hole_min_support: 4
     small_hole_max_height_range: 0.05
+    enable_piecewise_planar_regularization: true
+    planar_neighbor_height_tolerance: 0.06
+    planar_min_region_size: 12
+    planar_max_region_mad: 0.03
+    planar_max_regularization_residual: 0.05
+    planar_max_occlusion_distance: 0.12
+    planar_min_occlusion_support: 4
+    planar_inferred_half_range: 0.05
 
     initialize_elevation_map: false
     initialization_method: 0
