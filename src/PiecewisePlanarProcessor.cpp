@@ -383,16 +383,25 @@ Eigen::MatrixXi buildDirectionalSupportPlaneIds(
     const grid_map::GridMap& supportMap,
     const std::vector<AcceptedPlane>& acceptedPlanes,
     const PiecewisePlanarParameters& parameters) {
+  const grid_map::Size size = supportMap.getSize();
   Eigen::MatrixXi supportPlaneIds =
-      buildSupportPlaneIds(supportMap, acceptedPlanes, parameters);
+      Eigen::MatrixXi::Constant(size(0), size(1), -1);
   for (std::size_t planeIndex = 0u; planeIndex < acceptedPlanes.size();
        ++planeIndex) {
     const auto& accepted = acceptedPlanes[planeIndex];
-    if (accepted.directionalEligible) {
+    if (!accepted.directionalEligible) {
       continue;
     }
     for (const auto& cell : accepted.cells) {
-      supportPlaneIds(cell.index(0), cell.index(1)) = -1;
+      const double predictedHeight =
+          accepted.plane.coefficients(0) * cell.x +
+          accepted.plane.coefficients(1) * cell.y +
+          accepted.plane.coefficients(2);
+      if (std::abs(cell.elevation - predictedHeight) <=
+          parameters.maxRegularizationResidual) {
+        supportPlaneIds(cell.index(0), cell.index(1)) =
+            static_cast<int>(planeIndex);
+      }
     }
   }
   return supportPlaneIds;

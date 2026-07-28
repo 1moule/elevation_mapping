@@ -709,6 +709,27 @@ TEST(PiecewisePlanarProcessorTest,
 }
 
 TEST(PiecewisePlanarProcessorTest,
+     DirectionalCompletionIgnoresIneligiblePlaneWithOverlappingPrediction) {
+  auto support = makeMap(60, 5);
+  addFlatPatchInRectangle(support, 0.06, 0.18, -0.08, 0.08, 0.30f);
+  const auto ineligibleFirst = indexAt(support, 0.30, 0.0);
+  const auto ineligibleLast = indexAt(support, 0.54, 0.0);
+  addFlatPatch(support, std::min(ineligibleFirst(0), ineligibleLast(0)),
+               std::max(ineligibleFirst(0), ineligibleLast(0)),
+               ineligibleFirst(1), ineligibleFirst(1), 0.10f);
+  addFlatPatchInRectangle(support, 0.70, 0.82, -0.08, 0.08, 0.10f);
+  auto output = support;
+  const auto target = indexAt(support, 0.26, 0.0);
+
+  const auto result = processPiecewisePlanarElevation(
+      support, output, directionalParameters());
+
+  EXPECT_EQ(result.acceptedPlanes, 3u);
+  EXPECT_EQ(result.inferredCells, 0u);
+  EXPECT_FALSE(std::isfinite(output.at("elevation", target)));
+}
+
+TEST(PiecewisePlanarProcessorTest,
      DirectionalCompletionDoesNotPropagateInferredCells) {
   auto support = makeMap(60, 5);
   addFlatPatchInRectangle(support, 0.06, 0.18, -0.08, 0.08, 0.30f);
