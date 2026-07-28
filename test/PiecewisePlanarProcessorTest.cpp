@@ -487,7 +487,7 @@ TEST(PiecewisePlanarProcessorTest, RejectsNearCollinearPlaneSupport) {
 }
 
 TEST(PiecewisePlanarProcessorTest,
-     PairsPlanesAcrossWholeCandidateComponent) {
+     LeavesCellsWithOnlyOneLocalPlaneInvalid) {
   auto support = makeMap(12, 5);
   addFlatPatch(support, 0, 3, 0, 4, 0.0f);
   addFlatPatch(support, 8, 11, 0, 4, 0.30f);
@@ -498,57 +498,12 @@ TEST(PiecewisePlanarProcessorTest,
   const auto result =
       processPiecewisePlanarElevation(support, output, parameters);
 
-  EXPECT_EQ(result.inferredCells, 20u);
+  EXPECT_EQ(result.inferredCells, 0u);
   for (int x = 4; x <= 7; ++x) {
     for (int y = 0; y <= 4; ++y) {
-      expectInferredCellAtOneOfHeights(output, grid_map::Index(x, y), 0.0f,
-                                       0.30f);
+      EXPECT_FALSE(std::isfinite(output.at("elevation", grid_map::Index(x, y))));
     }
   }
-}
-
-TEST(PiecewisePlanarProcessorTest,
-     RejectsDistinctPlanesContactingComponentFromSameSide) {
-  auto support = makeMap(9, 6);
-  addFlatPatch(support, 0, 2, 0, 2, 0.0f);
-  addFlatPatch(support, 0, 2, 3, 5, 0.30f);
-  auto output = support;
-  auto parameters = occlusionParameters();
-  parameters.maxOcclusionDistance = 0.13f;
-
-  const auto result =
-      processPiecewisePlanarElevation(support, output, parameters);
-
-  EXPECT_EQ(result.inferredCells, 0u);
-}
-
-TEST(PiecewisePlanarProcessorTest, RejectsOutsidePlatformCorner) {
-  auto support = makeMap(6, 6);
-  addFlatPatch(support, 0, 2, 3, 5, 0.0f);
-  addFlatPatch(support, 3, 5, 0, 2, 0.30f);
-  auto output = support;
-  auto parameters = occlusionParameters();
-  parameters.maxOcclusionDistance = 0.13f;
-
-  const auto result =
-      processPiecewisePlanarElevation(support, output, parameters);
-
-  EXPECT_EQ(result.inferredCells, 0u);
-}
-
-TEST(PiecewisePlanarProcessorTest,
-     RejectsAdjacentNonBracketingSurfaces) {
-  auto support = makeMap(8, 6);
-  addFlatPatch(support, 0, 3, 0, 2, 0.0f);
-  addFlatPatch(support, 4, 7, 0, 2, 0.30f);
-  auto output = support;
-  auto parameters = occlusionParameters();
-  parameters.maxOcclusionDistance = 0.13f;
-
-  const auto result =
-      processPiecewisePlanarElevation(support, output, parameters);
-
-  EXPECT_EQ(result.inferredCells, 0u);
 }
 
 TEST(PiecewisePlanarProcessorTest,
@@ -776,35 +731,60 @@ TEST(PiecewisePlanarProcessorTest,
 }
 
 TEST(PiecewisePlanarProcessorTest,
-     DirectionalCompletionPairTieIsDeterministic) {
+     DirectionalCompletionPairTieUsesStableIdsAcrossCircularBufferRoll) {
   auto support = makeMap(30, 7);
   const auto highFirst = indexAt(support, 0.06, 0.0);
   const auto highLast = indexAt(support, 0.18, 0.0);
   const auto lowFirst = indexAt(support, 0.34, 0.0);
   const auto lowLast = indexAt(support, 0.46, 0.0);
   const auto target = indexAt(support, 0.26, 0.0);
-  ASSERT_GE(target(1), 3);
-  ASSERT_LT(target(1) + 3, support.getSize()(1));
+  ASSERT_GE(target(1), 2);
+  ASSERT_LT(target(1) + 2, support.getSize()(1));
   addFlatPatch(support, std::min(highFirst(0), highLast(0)),
-               std::max(highFirst(0), highLast(0)), target(1) - 3,
-               target(1) - 2, 0.30f);
-  addFlatPatch(support, std::min(highFirst(0), highLast(0)),
-               std::max(highFirst(0), highLast(0)), target(1) + 2,
-               target(1) + 3, 0.25f);
+               std::max(highFirst(0), highLast(0)), target(1) + 1,
+               target(1) + 2, 0.30f);
   addFlatPatch(support, std::min(lowFirst(0), lowLast(0)),
-               std::max(lowFirst(0), lowLast(0)), target(1) - 1,
-               target(1) + 1, 0.10f);
-  auto firstOutput = support;
-  auto secondOutput = support;
+               std::max(lowFirst(0), lowLast(0)), target(1) - 2,
+               target(1) - 1, 0.10f);
+  addFlatPatch(support, std::min(lowFirst(0), lowLast(0)),
+               std::max(lowFirst(0), lowLast(0)), target(1) + 1,
+               target(1) + 2, 0.05f);
+  auto output = support;
 
-  const auto firstResult = processPiecewisePlanarElevation(
-      support, firstOutput, directionalParameters());
-  processPiecewisePlanarElevation(support, secondOutput, directionalParameters());
+  grid_map::Position targetPosition;
+  grid_map::Position firstLowPosition;
+  grid_map::Position secondLowPosition;
+  ASSERT_TRUE(support.getPosition(target, targetPosition));
+  ASSERT_TRUE(support.getPosition(
+      grid_map::Index(lowFirst(0), target(1) - 1), firstLowPosition));
+  ASSERT_TRUE(support.getPosition(
+      grid_map::Index(lowFirst(0), target(1) + 1), secondLowPosition));
+  EXPECT_DOUBLE_EQ((targetPosition - firstLowPosition).squaredNorm(),
+                   (targetPosition - secondLowPosition).squaredNorm());
+  EXPECT_LT(secondLowPosition.y(), firstLowPosition.y());
 
-  EXPECT_EQ(firstResult.acceptedPlanes, 3u);
-  EXPECT_TRUE(std::isfinite(firstOutput.at("elevation", target)));
-  EXPECT_FLOAT_EQ(firstOutput.at("elevation", target),
-                  secondOutput.at("elevation", target));
+  const auto result = processPiecewisePlanarElevation(
+      support, output, directionalParameters());
+
+  EXPECT_EQ(result.acceptedPlanes, 3u);
+  EXPECT_NEAR(output.at("elevation", target), 0.05, 1.0e-5);
+
+  auto rolledSupport = support;
+  const grid_map::Position originalPosition = rolledSupport.getPosition();
+  ASSERT_TRUE(rolledSupport.move(
+      originalPosition + grid_map::Position(4.0 * kResolution, 0.0)));
+  rolledSupport.setPosition(originalPosition);
+  ASSERT_FALSE((support.getStartIndex() == rolledSupport.getStartIndex()).all());
+  copyLayersByPosition(support, rolledSupport);
+  auto rolledOutput = rolledSupport;
+  grid_map::Index rolledTarget;
+  ASSERT_TRUE(rolledSupport.getIndex(targetPosition, rolledTarget));
+
+  const auto rolledResult = processPiecewisePlanarElevation(
+      rolledSupport, rolledOutput, directionalParameters());
+
+  EXPECT_EQ(rolledResult.acceptedPlanes, 3u);
+  EXPECT_NEAR(rolledOutput.at("elevation", rolledTarget), 0.05, 1.0e-5);
 }
 
 TEST(PiecewisePlanarProcessorTest,

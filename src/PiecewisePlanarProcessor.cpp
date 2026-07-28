@@ -49,12 +49,6 @@ struct CellOffset {
   double squaredDistance;
 };
 
-struct ComponentContact {
-  grid_map::Position componentPosition;
-  grid_map::Position supportPosition;
-  double squaredDistance;
-};
-
 IndexKey makeKey(const grid_map::Index& index) {
   return {index(0), index(1)};
 }
@@ -111,27 +105,6 @@ std::vector<grid_map::Index> getNeighbors(const grid_map::GridMap& map,
       if (map.getIndex(neighborPosition, neighbor)) {
         neighbors.push_back(neighbor);
       }
-    }
-  }
-  return neighbors;
-}
-
-std::vector<grid_map::Index> getFourConnectedNeighbors(
-    const grid_map::GridMap& map, const grid_map::Index& index) {
-  grid_map::Position position;
-  if (!map.getPosition(index, position)) {
-    return {};
-  }
-
-  const double resolution = map.getResolution();
-  const std::vector<grid_map::Position> offsets{
-      {resolution, 0.0}, {-resolution, 0.0},
-      {0.0, resolution}, {0.0, -resolution}};
-  std::vector<grid_map::Index> neighbors;
-  for (const auto& offset : offsets) {
-    grid_map::Index neighbor;
-    if (map.getIndex(position + offset, neighbor)) {
-      neighbors.push_back(neighbor);
     }
   }
   return neighbors;
@@ -441,6 +414,7 @@ std::vector<PlaneCandidate> findEligibleCandidates(
     if (!supportMap.getPosition(supportIndex, supportPosition)) {
       continue;
     }
+    const double squaredDistance = (supportPosition - position).squaredNorm();
 
     const std::size_t stablePlaneIndex = static_cast<std::size_t>(planeIndex);
     const auto found = candidatesByPlane.find(stablePlaneIndex);
@@ -448,15 +422,15 @@ std::vector<PlaneCandidate> findEligibleCandidates(
       candidatesByPlane.emplace(
           stablePlaneIndex,
           PlaneCandidate{acceptedPlanes[stablePlaneIndex].regionId, 1u,
-                         offset.squaredDistance, supportPosition, 0.0f});
+                         squaredDistance, supportPosition, 0.0f});
       continue;
     }
     ++found->second.consistentSupportCount;
-    if (offset.squaredDistance < found->second.nearestSquaredDistance ||
-        (offset.squaredDistance == found->second.nearestSquaredDistance &&
+    if (squaredDistance < found->second.nearestSquaredDistance ||
+        (squaredDistance == found->second.nearestSquaredDistance &&
          isLexicographicallySmaller(supportPosition,
                                     found->second.nearestSupportPosition))) {
-      found->second.nearestSquaredDistance = offset.squaredDistance;
+      found->second.nearestSquaredDistance = squaredDistance;
       found->second.nearestSupportPosition = supportPosition;
     }
   }
@@ -485,34 +459,28 @@ bool candidatesHaveDistinctHeights(const PlaneCandidate& first,
          heightTolerance;
 }
 
-bool contactsBracketFromOpposingDirections(
-    const std::vector<ComponentContact>& firstContacts,
-    const std::vector<ComponentContact>& secondContacts) {
-  constexpr double kOpposingDirectionTolerance = 1.0e-9;
-  for (const auto& first : firstContacts) {
-    const grid_map::Position firstDirection =
-        first.supportPosition - first.componentPosition;
-    for (const auto& second : secondContacts) {
-      const grid_map::Position secondDirection =
-          second.supportPosition - second.componentPosition;
-      const double normProduct =
-          firstDirection.norm() * secondDirection.norm();
-      if (normProduct > 0.0 &&
-          firstDirection.dot(secondDirection) <
-              -kOpposingDirectionTolerance * normProduct) {
-        return true;
+std::vector<std::size_t> distinctHeightCandidateIndices(
+    const std::vector<PlaneCandidate>& candidates,
+    const float heightTolerance) {
+  std::vector<std::size_t> indices;
+  for (std::size_t firstIndex = 0u; firstIndex < candidates.size();
+       ++firstIndex) {
+    for (std::size_t secondIndex = firstIndex + 1u;
+         secondIndex < candidates.size(); ++secondIndex) {
+      if (!candidatesHaveDistinctHeights(candidates[firstIndex],
+                                         candidates[secondIndex],
+                                         heightTolerance)) {
+        continue;
+      }
+      if (std::find(indices.begin(), indices.end(), firstIndex) == indices.end()) {
+        indices.push_back(firstIndex);
+      }
+      if (std::find(indices.begin(), indices.end(), secondIndex) == indices.end()) {
+        indices.push_back(secondIndex);
       }
     }
   }
-  return false;
-}
-
-float predictHeightAt(const AcceptedPlane& accepted,
-                      const grid_map::Position& position) {
-  return static_cast<float>(
-      accepted.plane.coefficients(0) * position.x() +
-      accepted.plane.coefficients(1) * position.y() +
-      accepted.plane.coefficients(2));
+  return indices;
 }
 
 void writeInferredCell(const grid_map::GridMap& supportMap,
@@ -540,13 +508,10 @@ void completeThinOcclusionBands(
     const std::vector<AcceptedPlane>& acceptedPlanes,
     const PiecewisePlanarParameters& parameters,
     std::set<IndexKey>& inferredSupportIndices) {
-  const grid_map::Size size = supportMap.getSize();
   const Eigen::MatrixXi supportPlaneIds =
       buildSupportPlaneIds(supportMap, acceptedPlanes, parameters);
   const auto offsets =
       buildSearchOffsets(supportMap, parameters.maxOcclusionDistance);
-  Eigen::MatrixXi candidateMask = Eigen::MatrixXi::Zero(size(0), size(1));
-  std::map<IndexKey, std::vector<PlaneCandidate>> candidatesByCell;
   const std::vector<std::string> requiredLayers{
       "elevation", "upper_bound", "lower_bound"};
   for (grid_map::GridMapIterator iterator(supportMap); !iterator.isPastEnd();
@@ -557,127 +522,25 @@ void completeThinOcclusionBands(
     }
     auto candidates = findEligibleCandidates(
         supportMap, index, supportPlaneIds, acceptedPlanes, offsets, parameters);
-    if (candidates.empty()) {
+    const auto participatingCandidates = distinctHeightCandidateIndices(
+        candidates, parameters.neighborHeightTolerance);
+    if (participatingCandidates.empty()) {
       continue;
     }
-    candidateMask(index(0), index(1)) = 1;
-    candidatesByCell.emplace(makeKey(index), std::move(candidates));
-  }
-
-  std::set<IndexKey> visited;
-  for (const auto& entry : candidatesByCell) {
-    const grid_map::Index start(entry.first.first, entry.first.second);
-    if (!visited.insert(entry.first).second) {
-      continue;
-    }
-
-    std::vector<grid_map::Index> component;
-    std::vector<grid_map::Index> queue{start};
-    while (!queue.empty()) {
-      const grid_map::Index current = queue.back();
-      queue.pop_back();
-      component.push_back(current);
-      for (const auto& neighbor : getFourConnectedNeighbors(supportMap, current)) {
-        if (candidateMask(neighbor(0), neighbor(1)) == 0 ||
-            !visited.insert(makeKey(neighbor)).second) {
-          continue;
-        }
-        queue.push_back(neighbor);
-      }
-    }
-
-    std::sort(component.begin(), component.end(),
-              [&supportMap](const grid_map::Index& first,
-                            const grid_map::Index& second) {
-                grid_map::Position firstPosition;
-                grid_map::Position secondPosition;
-                supportMap.getPosition(first, firstPosition);
-                supportMap.getPosition(second, secondPosition);
-                return isLexicographicallySmaller(firstPosition,
-                                                  secondPosition);
-              });
-
-    std::map<std::size_t, std::vector<ComponentContact>> contactsByPlane;
-    grid_map::Position componentCenter = grid_map::Position::Zero();
-    for (const auto& index : component) {
-      grid_map::Position componentPosition;
-      if (!supportMap.getPosition(index, componentPosition)) {
-        continue;
-      }
-      componentCenter += componentPosition;
-      const auto& candidates = candidatesByCell.at(makeKey(index));
-      for (const auto& candidate : candidates) {
-        const ComponentContact contact{
-            componentPosition, candidate.nearestSupportPosition,
-            candidate.nearestSquaredDistance};
-        auto& contacts = contactsByPlane[candidate.planeId];
-        if (contacts.empty() ||
-            contact.squaredDistance < contacts.front().squaredDistance) {
-          contacts.clear();
-          contacts.push_back(contact);
-        } else if (contact.squaredDistance ==
-                   contacts.front().squaredDistance) {
-          contacts.push_back(contact);
-        }
-      }
-    }
-    componentCenter /= static_cast<double>(component.size());
-
-    std::set<std::size_t> participatingPlaneIds;
-    for (auto first = contactsByPlane.begin(); first != contactsByPlane.end();
-         ++first) {
-      for (auto second = std::next(first); second != contactsByPlane.end();
-           ++second) {
-        const PlaneCandidate firstAtCenter{
-            first->first, 0u, 0.0, grid_map::Position::Zero(),
-            predictHeightAt(acceptedPlanes[first->first], componentCenter)};
-        const PlaneCandidate secondAtCenter{
-            second->first, 0u, 0.0, grid_map::Position::Zero(),
-            predictHeightAt(acceptedPlanes[second->first], componentCenter)};
-        if (!candidatesHaveDistinctHeights(
-                firstAtCenter, secondAtCenter,
-                parameters.neighborHeightTolerance) ||
-            !contactsBracketFromOpposingDirections(
-                first->second, second->second)) {
-          continue;
-        }
-        participatingPlaneIds.insert(first->first);
-        participatingPlaneIds.insert(second->first);
-      }
-    }
-    if (participatingPlaneIds.empty()) {
-      continue;
-    }
-
-    for (const auto& index : component) {
-      const auto& candidates = candidatesByCell.at(makeKey(index));
-      std::size_t selectedIndex = candidates.size();
-      for (std::size_t candidateIndex = 0u;
-           candidateIndex < candidates.size(); ++candidateIndex) {
-        if (participatingPlaneIds.count(
-                candidates[candidateIndex].planeId) == 0u) {
-          continue;
-        }
-        if (selectedIndex == candidates.size()) {
-          selectedIndex = candidateIndex;
-          continue;
-        }
-        const auto& selected = candidates[selectedIndex];
-        const auto& candidate = candidates[candidateIndex];
-        if (candidate.nearestSquaredDistance < selected.nearestSquaredDistance ||
-            (candidate.nearestSquaredDistance == selected.nearestSquaredDistance &&
-             candidate.planeId < selected.planeId)) {
-          selectedIndex = candidateIndex;
-        }
-      }
-      if (selectedIndex == candidates.size()) {
-        continue;
-      }
+    std::size_t selectedIndex = participatingCandidates.front();
+    for (const auto candidateIndex : participatingCandidates) {
       const auto& selected = candidates[selectedIndex];
-      writeInferredCell(supportMap, outputMap, index, selected.predictedHeight,
-                        parameters);
-      inferredSupportIndices.insert(makeKey(index));
+      const auto& candidate = candidates[candidateIndex];
+      if (candidate.nearestSquaredDistance < selected.nearestSquaredDistance ||
+          (candidate.nearestSquaredDistance == selected.nearestSquaredDistance &&
+           candidate.planeId < selected.planeId)) {
+        selectedIndex = candidateIndex;
+      }
     }
+    const auto& selected = candidates[selectedIndex];
+    writeInferredCell(supportMap, outputMap, index, selected.predictedHeight,
+                      parameters);
+    inferredSupportIndices.insert(makeKey(index));
   }
 }
 
