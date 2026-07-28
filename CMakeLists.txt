@@ -101,6 +101,7 @@ add_library(${PROJECT_NAME}_library
   src/ElevationMap.cpp
   src/ScanCellSelector.cpp
   src/SmallHoleFiller.cpp
+  src/PiecewisePlanarProcessor.cpp
   src/input_sources/Input.cpp
   src/input_sources/InputSourceManager.cpp
   src/postprocessing/PostprocessorPool.cpp
@@ -271,6 +272,19 @@ if(BUILD_TESTING)
   )
 
   target_include_directories(test_small_hole_filler
+    PRIVATE
+      include
+  )
+
+  ament_add_gtest(test_piecewise_planar_processor
+    test/PiecewisePlanarProcessorTest.cpp
+  )
+
+  target_link_libraries(test_piecewise_planar_processor
+    ${PROJECT_NAME}_library
+  )
+
+  target_include_directories(test_piecewise_planar_processor
     PRIVATE
       include
   )
