@@ -58,7 +58,7 @@ elevation_mapping:
     planar_min_occlusion_support: 6
     planar_inferred_half_range: 0.05
     enable_directional_ground_completion: true
-    directional_ground_max_gap_width: 0.40
+    directional_ground_max_gap_width: 0.25
 
     initialize_elevation_map: false
     initialization_method: 0
