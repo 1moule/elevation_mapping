@@ -35,6 +35,18 @@ struct AcceptedPlane {
   std::vector<SupportCell> cells;
 };
 
+struct PlaneCandidate {
+  std::size_t planeId;
+  std::size_t consistentSupportCount;
+  double nearestSquaredDistance;
+  float predictedHeight;
+};
+
+struct CellOffset {
+  grid_map::Position offset;
+  double squaredDistance;
+};
+
 IndexKey makeKey(const grid_map::Index& index) {
   return {index(0), index(1)};
 }
@@ -91,6 +103,27 @@ std::vector<grid_map::Index> getNeighbors(const grid_map::GridMap& map,
       if (map.getIndex(neighborPosition, neighbor)) {
         neighbors.push_back(neighbor);
       }
+    }
+  }
+  return neighbors;
+}
+
+std::vector<grid_map::Index> getFourConnectedNeighbors(
+    const grid_map::GridMap& map, const grid_map::Index& index) {
+  grid_map::Position position;
+  if (!map.getPosition(index, position)) {
+    return {};
+  }
+
+  const double resolution = map.getResolution();
+  const std::vector<grid_map::Position> offsets{
+      {resolution, 0.0}, {-resolution, 0.0},
+      {0.0, resolution}, {0.0, -resolution}};
+  std::vector<grid_map::Index> neighbors;
+  for (const auto& offset : offsets) {
+    grid_map::Index neighbor;
+    if (map.getIndex(position + offset, neighbor)) {
+      neighbors.push_back(neighbor);
     }
   }
   return neighbors;
@@ -245,6 +278,231 @@ std::vector<AcceptedPlane> findAcceptedPlanes(
   return acceptedPlanes;
 }
 
+Eigen::MatrixXi buildSupportPlaneIds(
+    const grid_map::GridMap& supportMap,
+    const std::vector<AcceptedPlane>& acceptedPlanes,
+    const PiecewisePlanarParameters& parameters) {
+  const grid_map::Size size = supportMap.getSize();
+  Eigen::MatrixXi supportPlaneIds =
+      Eigen::MatrixXi::Constant(size(0), size(1), -1);
+  for (std::size_t planeIndex = 0u; planeIndex < acceptedPlanes.size();
+       ++planeIndex) {
+    const auto& accepted = acceptedPlanes[planeIndex];
+    for (const auto& cell : accepted.cells) {
+      const double predictedHeight =
+          accepted.plane.coefficients(0) * cell.x +
+          accepted.plane.coefficients(1) * cell.y +
+          accepted.plane.coefficients(2);
+      if (std::abs(cell.elevation - predictedHeight) <=
+          parameters.maxRegularizationResidual) {
+        supportPlaneIds(cell.index(0), cell.index(1)) =
+            static_cast<int>(planeIndex);
+      }
+    }
+  }
+  return supportPlaneIds;
+}
+
+std::vector<CellOffset> buildSearchOffsets(
+    const grid_map::GridMap& map,
+    const PiecewisePlanarParameters& parameters) {
+  const double resolution = map.getResolution();
+  const int cellRadius = static_cast<int>(
+      std::ceil(parameters.maxOcclusionDistance / resolution));
+  const double maximumSquaredDistance =
+      parameters.maxOcclusionDistance * parameters.maxOcclusionDistance;
+  std::vector<CellOffset> offsets;
+  for (int xOffset = -cellRadius; xOffset <= cellRadius; ++xOffset) {
+    for (int yOffset = -cellRadius; yOffset <= cellRadius; ++yOffset) {
+      const grid_map::Position offset(xOffset * resolution,
+                                      yOffset * resolution);
+      const double squaredDistance = offset.squaredNorm();
+      if (squaredDistance <= maximumSquaredDistance) {
+        offsets.push_back({offset, squaredDistance});
+      }
+    }
+  }
+  return offsets;
+}
+
+std::vector<PlaneCandidate> findEligibleCandidates(
+    const grid_map::GridMap& supportMap,
+    const grid_map::Index& index,
+    const Eigen::MatrixXi& supportPlaneIds,
+    const std::vector<AcceptedPlane>& acceptedPlanes,
+    const std::vector<CellOffset>& offsets,
+    const PiecewisePlanarParameters& parameters) {
+  grid_map::Position position;
+  if (!supportMap.getPosition(index, position)) {
+    return {};
+  }
+
+  std::map<std::size_t, PlaneCandidate> candidatesByPlane;
+  for (const auto& offset : offsets) {
+    grid_map::Index supportIndex;
+    if (!supportMap.getIndex(position + offset.offset, supportIndex)) {
+      continue;
+    }
+    const int planeIndex = supportPlaneIds(supportIndex(0), supportIndex(1));
+    if (planeIndex < 0) {
+      continue;
+    }
+
+    const std::size_t stablePlaneIndex = static_cast<std::size_t>(planeIndex);
+    const auto found = candidatesByPlane.find(stablePlaneIndex);
+    if (found == candidatesByPlane.end()) {
+      candidatesByPlane.emplace(
+          stablePlaneIndex,
+          PlaneCandidate{acceptedPlanes[stablePlaneIndex].regionId, 1u,
+                         offset.squaredDistance, 0.0f});
+      continue;
+    }
+    ++found->second.consistentSupportCount;
+    found->second.nearestSquaredDistance = std::min(
+        found->second.nearestSquaredDistance, offset.squaredDistance);
+  }
+
+  std::vector<PlaneCandidate> candidates;
+  candidates.reserve(candidatesByPlane.size());
+  for (const auto& entry : candidatesByPlane) {
+    const std::size_t planeIndex = entry.first;
+    PlaneCandidate candidate = entry.second;
+    if (candidate.consistentSupportCount < parameters.minOcclusionSupport) {
+      continue;
+    }
+    const auto& plane = acceptedPlanes[planeIndex].plane;
+    candidate.predictedHeight = static_cast<float>(
+        plane.coefficients(0) * position.x() +
+        plane.coefficients(1) * position.y() + plane.coefficients(2));
+    candidates.push_back(candidate);
+  }
+  return candidates;
+}
+
+bool candidatesHaveDistinctHeights(const PlaneCandidate& first,
+                                   const PlaneCandidate& second,
+                                   const float heightTolerance) {
+  return std::abs(first.predictedHeight - second.predictedHeight) >=
+         heightTolerance;
+}
+
+std::vector<std::size_t> distinctHeightCandidateIndices(
+    const std::vector<PlaneCandidate>& candidates,
+    const float heightTolerance) {
+  std::vector<std::size_t> indices;
+  for (std::size_t firstIndex = 0u; firstIndex < candidates.size();
+       ++firstIndex) {
+    for (std::size_t secondIndex = firstIndex + 1u;
+         secondIndex < candidates.size(); ++secondIndex) {
+      if (!candidatesHaveDistinctHeights(candidates[firstIndex],
+                                         candidates[secondIndex],
+                                         heightTolerance)) {
+        continue;
+      }
+      if (std::find(indices.begin(), indices.end(), firstIndex) == indices.end()) {
+        indices.push_back(firstIndex);
+      }
+      if (std::find(indices.begin(), indices.end(), secondIndex) == indices.end()) {
+        indices.push_back(secondIndex);
+      }
+    }
+  }
+  return indices;
+}
+
+std::size_t completeThinOcclusionBands(
+    const grid_map::GridMap& supportMap, grid_map::GridMap& outputMap,
+    const std::vector<AcceptedPlane>& acceptedPlanes,
+    const PiecewisePlanarParameters& parameters) {
+  const grid_map::Size size = supportMap.getSize();
+  const Eigen::MatrixXi supportPlaneIds =
+      buildSupportPlaneIds(supportMap, acceptedPlanes, parameters);
+  const auto offsets = buildSearchOffsets(supportMap, parameters);
+  Eigen::MatrixXi candidateMask = Eigen::MatrixXi::Zero(size(0), size(1));
+  std::map<IndexKey, std::vector<PlaneCandidate>> candidatesByCell;
+  const std::vector<std::string> requiredLayers{
+      "elevation", "upper_bound", "lower_bound"};
+  for (grid_map::GridMapIterator iterator(supportMap); !iterator.isPastEnd();
+       ++iterator) {
+    const grid_map::Index index = *iterator;
+    if (supportMap.isValid(index, requiredLayers)) {
+      continue;
+    }
+    auto candidates = findEligibleCandidates(
+        supportMap, index, supportPlaneIds, acceptedPlanes, offsets, parameters);
+    if (candidates.empty()) {
+      continue;
+    }
+    candidateMask(index(0), index(1)) = 1;
+    candidatesByCell.emplace(makeKey(index), std::move(candidates));
+  }
+
+  std::set<IndexKey> visited;
+  std::size_t inferredCells = 0u;
+  for (const auto& entry : candidatesByCell) {
+    const grid_map::Index start(entry.first.first, entry.first.second);
+    if (!visited.insert(entry.first).second) {
+      continue;
+    }
+
+    std::vector<grid_map::Index> component;
+    std::vector<grid_map::Index> queue{start};
+    while (!queue.empty()) {
+      const grid_map::Index current = queue.back();
+      queue.pop_back();
+      component.push_back(current);
+      for (const auto& neighbor : getFourConnectedNeighbors(supportMap, current)) {
+        if (candidateMask(neighbor(0), neighbor(1)) == 0 ||
+            !visited.insert(makeKey(neighbor)).second) {
+          continue;
+        }
+        queue.push_back(neighbor);
+      }
+    }
+
+    bool hasDistinctHeightPair = false;
+    for (const auto& index : component) {
+      const auto& candidates = candidatesByCell.at(makeKey(index));
+      if (!distinctHeightCandidateIndices(candidates,
+                                          parameters.neighborHeightTolerance)
+               .empty()) {
+        hasDistinctHeightPair = true;
+        break;
+      }
+    }
+    if (!hasDistinctHeightPair) {
+      continue;
+    }
+
+    for (const auto& index : component) {
+      const auto& candidates = candidatesByCell.at(makeKey(index));
+      const auto participatingCandidates = distinctHeightCandidateIndices(
+          candidates, parameters.neighborHeightTolerance);
+      if (participatingCandidates.empty()) {
+        continue;
+      }
+      std::size_t selectedIndex = participatingCandidates.front();
+      for (const auto candidateIndex : participatingCandidates) {
+        const auto& selected = candidates[selectedIndex];
+        const auto& candidate = candidates[candidateIndex];
+        if (candidate.nearestSquaredDistance < selected.nearestSquaredDistance ||
+            (candidate.nearestSquaredDistance == selected.nearestSquaredDistance &&
+             candidate.planeId < selected.planeId)) {
+          selectedIndex = candidateIndex;
+        }
+      }
+      const auto& selected = candidates[selectedIndex];
+      outputMap.at("elevation", index) = selected.predictedHeight;
+      outputMap.at("lower_bound", index) =
+          selected.predictedHeight - parameters.inferredHalfRange;
+      outputMap.at("upper_bound", index) =
+          selected.predictedHeight + parameters.inferredHalfRange;
+      ++inferredCells;
+    }
+  }
+  return inferredCells;
+}
+
 }  // namespace
 
 PiecewisePlanarResult processPiecewisePlanarElevationIfEnabled(
@@ -294,6 +552,8 @@ PiecewisePlanarResult processPiecewisePlanarElevation(
       ++result.regularizedCells;
     }
   }
+  result.inferredCells = completeThinOcclusionBands(
+      supportMap, outputMap, acceptedPlanes, parameters);
   return result;
 }
 

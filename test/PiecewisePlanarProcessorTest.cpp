@@ -1,6 +1,9 @@
 #include "elevation_mapping/PiecewisePlanarProcessor.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <limits>
+#include <vector>
 #include <gtest/gtest.h>
 #include <grid_map_core/GridMap.hpp>
 #include <grid_map_core/iterators/GridMapIterator.hpp>
@@ -14,6 +17,14 @@ grid_map::GridMap makeMap() {
   grid_map::GridMap map({"elevation", "upper_bound", "lower_bound"});
   map.setGeometry(grid_map::Length(0.2, 0.2), kResolution,
                   grid_map::Position(0.0, 0.0));
+  return map;
+}
+
+grid_map::GridMap makeMap(const int xCells, const int yCells) {
+  grid_map::GridMap map({"elevation", "upper_bound", "lower_bound"});
+  map.setGeometry(grid_map::Length(kResolution * xCells,
+                                   kResolution * yCells),
+                  kResolution, grid_map::Position(0.0, 0.0));
   return map;
 }
 
@@ -48,6 +59,54 @@ void addNoisyPlane(grid_map::GridMap& map) {
 
 PiecewisePlanarParameters defaultParameters() {
   return {0.05f, 4u, 0.03f, 0.03f, 0.1f, 1u, 0.1f};
+}
+
+PiecewisePlanarParameters occlusionParameters() {
+  auto parameters = defaultParameters();
+  parameters.inferredHalfRange = 0.05f;
+  return parameters;
+}
+
+void addFlatPatch(grid_map::GridMap& map, const int firstX, const int lastX,
+                  const int firstY, const int lastY, const float elevation) {
+  for (int x = firstX; x <= lastX; ++x) {
+    for (int y = firstY; y <= lastY; ++y) {
+      setSample(map, grid_map::Index(x, y), elevation);
+    }
+  }
+}
+
+void expectInferredCellAtOneOfHeights(const grid_map::GridMap& output,
+                                      const grid_map::Index& index,
+                                      const float firstHeight,
+                                      const float secondHeight) {
+  const float elevation = output.at("elevation", index);
+  EXPECT_TRUE(std::abs(elevation - firstHeight) < 1.0e-4f ||
+              std::abs(elevation - secondHeight) < 1.0e-4f);
+  EXPECT_FALSE(elevation > firstHeight + 1.0e-4f &&
+               elevation < secondHeight - 1.0e-4f);
+  EXPECT_NEAR(output.at("upper_bound", index) - elevation, 0.05, 1.0e-5);
+  EXPECT_NEAR(elevation - output.at("lower_bound", index), 0.05, 1.0e-5);
+}
+
+double nearestOriginalSupportDistance(const grid_map::GridMap& support,
+                                      const grid_map::Index& index) {
+  grid_map::Position position;
+  EXPECT_TRUE(support.getPosition(index, position));
+  double nearestDistance = std::numeric_limits<double>::infinity();
+  const std::vector<std::string> layers{
+      "elevation", "upper_bound", "lower_bound"};
+  for (grid_map::GridMapIterator iterator(support); !iterator.isPastEnd();
+       ++iterator) {
+    if (!support.isValid(*iterator, layers)) {
+      continue;
+    }
+    grid_map::Position supportPosition;
+    EXPECT_TRUE(support.getPosition(*iterator, supportPosition));
+    nearestDistance = std::min(nearestDistance,
+                               (supportPosition - position).norm());
+  }
+  return nearestDistance;
 }
 
 void expectMapEqual(const grid_map::GridMap& expected,
@@ -146,6 +205,103 @@ TEST(PiecewisePlanarProcessorTest, DoesNotModifySupportMap) {
   processPiecewisePlanarElevation(support, output, defaultParameters());
 
   expectMapEqual(before, support);
+}
+
+TEST(PiecewisePlanarProcessorTest,
+     FillsThinBandWithOnlyBorderingPlaneHeights) {
+  auto support = makeMap(10, 5);
+  addFlatPatch(support, 0, 3, 0, 4, 0.0f);
+  addFlatPatch(support, 6, 9, 0, 4, 0.30f);
+  auto output = support;
+
+  const auto result = processPiecewisePlanarElevation(
+      support, output, occlusionParameters());
+
+  EXPECT_EQ(result.inferredCells, 10u);
+  for (int x = 4; x <= 5; ++x) {
+    for (int y = 0; y <= 4; ++y) {
+      expectInferredCellAtOneOfHeights(output, grid_map::Index(x, y), 0.0f,
+                                       0.30f);
+    }
+  }
+}
+
+TEST(PiecewisePlanarProcessorTest, SupportsThreeIndependentHeightLevels) {
+  auto support = makeMap(16, 5);
+  addFlatPatch(support, 0, 3, 0, 4, 0.0f);
+  addFlatPatch(support, 6, 9, 0, 4, 0.20f);
+  addFlatPatch(support, 12, 15, 0, 4, 0.45f);
+  auto output = support;
+
+  const auto result = processPiecewisePlanarElevation(
+      support, output, occlusionParameters());
+
+  EXPECT_EQ(result.inferredCells, 20u);
+  for (int x = 4; x <= 5; ++x) {
+    for (int y = 0; y <= 4; ++y) {
+      expectInferredCellAtOneOfHeights(output, grid_map::Index(x, y), 0.0f,
+                                       0.20f);
+    }
+  }
+  for (int x = 10; x <= 11; ++x) {
+    for (int y = 0; y <= 4; ++y) {
+      expectInferredCellAtOneOfHeights(output, grid_map::Index(x, y), 0.20f,
+                                       0.45f);
+    }
+  }
+}
+
+TEST(PiecewisePlanarProcessorTest, DoesNotExtrapolateFromOnePlane) {
+  auto support = makeMap(10, 5);
+  addFlatPatch(support, 0, 3, 0, 4, 0.0f);
+  auto output = support;
+
+  const auto result = processPiecewisePlanarElevation(
+      support, output, occlusionParameters());
+
+  EXPECT_EQ(result.inferredCells, 0u);
+  for (int x = 4; x <= 9; ++x) {
+    for (int y = 0; y <= 4; ++y) {
+      EXPECT_FALSE(std::isfinite(output.at("elevation", grid_map::Index(x, y))));
+    }
+  }
+}
+
+TEST(PiecewisePlanarProcessorTest, LeavesWideUnknownInteriorInvalid) {
+  auto support = makeMap(14, 5);
+  addFlatPatch(support, 0, 3, 0, 4, 0.0f);
+  addFlatPatch(support, 10, 13, 0, 4, 0.30f);
+  auto output = support;
+
+  const auto result = processPiecewisePlanarElevation(
+      support, output, occlusionParameters());
+
+  EXPECT_EQ(result.inferredCells, 0u);
+  EXPECT_FALSE(std::isfinite(output.at("elevation", grid_map::Index(6, 2))));
+  EXPECT_FALSE(std::isfinite(output.at("elevation", grid_map::Index(7, 2))));
+}
+
+TEST(PiecewisePlanarProcessorTest, InferredCellsDoNotPropagate) {
+  auto support = makeMap(16, 9);
+  addFlatPatch(support, 4, 7, 2, 6, 0.0f);
+  addFlatPatch(support, 10, 13, 2, 6, 0.30f);
+  auto output = support;
+
+  const auto result = processPiecewisePlanarElevation(
+      support, output, occlusionParameters());
+
+  EXPECT_GT(result.inferredCells, 0u);
+  for (grid_map::GridMapIterator iterator(support); !iterator.isPastEnd();
+       ++iterator) {
+    if (support.isValid(*iterator, {"elevation", "upper_bound", "lower_bound"}) ||
+        !std::isfinite(output.at("elevation", *iterator))) {
+      continue;
+    }
+    EXPECT_LE(nearestOriginalSupportDistance(support, *iterator), 0.1 + 1.0e-6);
+  }
+  const grid_map::Index distantUnknown(0, 0);
+  EXPECT_GT(nearestOriginalSupportDistance(support, distantUnknown), 0.12);
+  EXPECT_FALSE(std::isfinite(output.at("elevation", distantUnknown)));
 }
 
 }  // namespace
