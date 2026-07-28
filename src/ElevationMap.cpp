@@ -59,7 +59,7 @@ ElevationMap::ElevationMap(std::shared_ptr<rclcpp::Node> nodeHandle)
       enablePiecewisePlanarRegularization_(
           defaultPiecewisePlanarRegularizationEnabled()),
       piecewisePlanarParameters_{
-          0.06f, 12u, 0.03f, 0.05f, 0.12f, 4u, 0.05f} {
+          0.06f, 12u, 0.03f, 0.05f, 0.12f, 4u, 0.05f, false, 0.40f} {
   nodeHandle_->declare_parameter(
       "enable_small_hole_filling", defaultSmallHoleFillingEnabled());
   nodeHandle_->declare_parameter("small_hole_max_size", 4);
@@ -83,6 +83,8 @@ ElevationMap::ElevationMap(std::shared_ptr<rclcpp::Node> nodeHandle)
   nodeHandle_->declare_parameter("planar_max_occlusion_distance", 0.12);
   nodeHandle_->declare_parameter("planar_min_occlusion_support", 4);
   nodeHandle_->declare_parameter("planar_inferred_half_range", 0.05);
+  nodeHandle_->declare_parameter("enable_directional_ground_completion", false);
+  nodeHandle_->declare_parameter("directional_ground_max_gap_width", 0.40);
   nodeHandle_->get_parameter(
       "enable_piecewise_planar_regularization",
       enablePiecewisePlanarRegularization_);
@@ -105,6 +107,12 @@ ElevationMap::ElevationMap(std::shared_ptr<rclcpp::Node> nodeHandle)
   nodeHandle_->get_parameter(
       "planar_inferred_half_range",
       piecewisePlanarParameters_.inferredHalfRange);
+  nodeHandle_->get_parameter(
+      "enable_directional_ground_completion",
+      piecewisePlanarParameters_.enableDirectionalGroundCompletion);
+  nodeHandle_->get_parameter(
+      "directional_ground_max_gap_width",
+      piecewisePlanarParameters_.directionalGroundMaxGapWidth);
   piecewisePlanarParameters_.minRegionSize =
       static_cast<std::size_t>(minRegionSize < 0 ? 0 : minRegionSize);
   piecewisePlanarParameters_.minOcclusionSupport =

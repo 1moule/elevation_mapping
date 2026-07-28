@@ -830,23 +830,49 @@ TEST(PiecewisePlanarProcessorTest,
 }
 
 TEST(PiecewisePlanarProcessorTest,
-     InvalidDirectionalWidthPreservesConservativeCompletion) {
+     InvalidDirectionalWidthsDoNotCompleteDirectionalGaps) {
+  auto support = makeMap(30, 5);
+  addFlatPatchInRectangle(support, 0.06, 0.18, -0.08, 0.08, 0.30f);
+  addFlatPatchInRectangle(support, 0.34, 0.46, -0.08, 0.08, 0.10f);
+  const std::vector<float> invalidWidths{
+      std::numeric_limits<float>::quiet_NaN(), 0.0f, -0.40f};
+
+  for (const float invalidWidth : invalidWidths) {
+    auto output = support;
+    auto parameters = directionalParameters();
+    parameters.directionalGroundMaxGapWidth = invalidWidth;
+
+    const auto result =
+        processPiecewisePlanarElevation(support, output, parameters);
+
+    EXPECT_EQ(result.inferredCells, 0u);
+    expectCellsInRectangleInvalid(output, 0.20, 0.32, -0.08, 0.08);
+  }
+}
+
+TEST(PiecewisePlanarProcessorTest,
+     InvalidDirectionalWidthsPreserveConservativeCompletion) {
   auto support = makeMap(10, 5);
   addFlatPatch(support, 0, 3, 0, 4, 0.0f);
   addFlatPatch(support, 6, 9, 0, 4, 0.30f);
-  auto output = support;
-  auto parameters = occlusionParameters();
-  parameters.enableDirectionalGroundCompletion = true;
-  parameters.directionalGroundMaxGapWidth =
-      std::numeric_limits<float>::quiet_NaN();
+  const std::vector<float> invalidWidths{
+      std::numeric_limits<float>::quiet_NaN(), 0.0f, -0.40f};
 
-  const auto result = processPiecewisePlanarElevation(support, output, parameters);
+  for (const float invalidWidth : invalidWidths) {
+    auto output = support;
+    auto parameters = occlusionParameters();
+    parameters.enableDirectionalGroundCompletion = true;
+    parameters.directionalGroundMaxGapWidth = invalidWidth;
 
-  EXPECT_EQ(result.inferredCells, 10u);
-  for (int x = 4; x <= 5; ++x) {
-    for (int y = 0; y <= 4; ++y) {
-      expectInferredCellAtOneOfHeights(output, grid_map::Index(x, y), 0.0f,
-                                       0.30f);
+    const auto result =
+        processPiecewisePlanarElevation(support, output, parameters);
+
+    EXPECT_EQ(result.inferredCells, 10u);
+    for (int x = 4; x <= 5; ++x) {
+      for (int y = 0; y <= 4; ++y) {
+        expectInferredCellAtOneOfHeights(output, grid_map::Index(x, y), 0.0f,
+                                         0.30f);
+      }
     }
   }
 }
