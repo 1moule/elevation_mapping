@@ -76,6 +76,22 @@ void addFlatPatch(grid_map::GridMap& map, const int firstX, const int lastX,
   }
 }
 
+void copyLayersByPosition(const grid_map::GridMap& source,
+                          grid_map::GridMap& destination) {
+  const std::vector<std::string> layers{
+      "elevation", "upper_bound", "lower_bound"};
+  for (grid_map::GridMapIterator iterator(source); !iterator.isPastEnd();
+       ++iterator) {
+    grid_map::Position position;
+    ASSERT_TRUE(source.getPosition(*iterator, position));
+    grid_map::Index destinationIndex;
+    ASSERT_TRUE(destination.getIndex(position, destinationIndex));
+    for (const auto& layer : layers) {
+      destination.at(layer, destinationIndex) = source.at(layer, *iterator);
+    }
+  }
+}
+
 void expectInferredCellAtOneOfHeights(const grid_map::GridMap& output,
                                       const grid_map::Index& index,
                                       const float firstHeight,
@@ -222,6 +238,42 @@ TEST(PiecewisePlanarProcessorTest,
     for (int y = 0; y <= 4; ++y) {
       expectInferredCellAtOneOfHeights(output, grid_map::Index(x, y), 0.0f,
                                        0.30f);
+    }
+  }
+}
+
+TEST(PiecewisePlanarProcessorTest,
+     WritesInferredCellsAtPhysicalPositionsWithDifferentStartIndices) {
+  auto support = makeMap(12, 5);
+  addFlatPatch(support, 0, 3, 0, 4, 0.0f);
+  addFlatPatch(support, 6, 9, 0, 4, 0.30f);
+  auto output = support;
+  const grid_map::Position originalPosition = output.getPosition();
+  ASSERT_TRUE(output.move(originalPosition +
+                          grid_map::Position(kResolution, 0.0)));
+  output.setPosition(originalPosition);
+  ASSERT_FALSE((support.getStartIndex() == output.getStartIndex()).all());
+  ASSERT_TRUE(support.getPosition() == output.getPosition());
+  ASSERT_TRUE((support.getLength() == output.getLength()).all());
+  EXPECT_FLOAT_EQ(support.getResolution(), output.getResolution());
+  copyLayersByPosition(support, output);
+
+  const auto result = processPiecewisePlanarElevation(
+      support, output, occlusionParameters());
+
+  EXPECT_EQ(result.inferredCells, 10u);
+  for (grid_map::GridMapIterator iterator(support); !iterator.isPastEnd();
+       ++iterator) {
+    grid_map::Position position;
+    ASSERT_TRUE(support.getPosition(*iterator, position));
+    grid_map::Index outputIndex;
+    ASSERT_TRUE(output.getIndex(position, outputIndex));
+    if ((*iterator)(0) >= 4 && (*iterator)(0) <= 5) {
+      expectInferredCellAtOneOfHeights(output, outputIndex, 0.0f, 0.30f);
+      continue;
+    }
+    if ((*iterator)(0) >= 10) {
+      EXPECT_FALSE(std::isfinite(output.at("elevation", outputIndex)));
     }
   }
 }

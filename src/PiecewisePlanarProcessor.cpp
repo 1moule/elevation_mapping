@@ -492,10 +492,18 @@ std::size_t completeThinOcclusionBands(
         }
       }
       const auto& selected = candidates[selectedIndex];
-      outputMap.at("elevation", index) = selected.predictedHeight;
-      outputMap.at("lower_bound", index) =
+      grid_map::Position position;
+      if (!supportMap.getPosition(index, position)) {
+        continue;
+      }
+      grid_map::Index outputIndex;
+      if (!outputMap.getIndex(position, outputIndex)) {
+        continue;
+      }
+      outputMap.at("elevation", outputIndex) = selected.predictedHeight;
+      outputMap.at("lower_bound", outputIndex) =
           selected.predictedHeight - parameters.inferredHalfRange;
-      outputMap.at("upper_bound", index) =
+      outputMap.at("upper_bound", outputIndex) =
           selected.predictedHeight + parameters.inferredHalfRange;
       ++inferredCells;
     }
