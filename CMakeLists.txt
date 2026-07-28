@@ -100,6 +100,7 @@ add_library(${PROJECT_NAME}_library
   src/ElevationMapping.cpp
   src/ElevationMap.cpp
   src/ScanCellSelector.cpp
+  src/SmallHoleFiller.cpp
   src/input_sources/Input.cpp
   src/input_sources/InputSourceManager.cpp
   src/postprocessing/PostprocessorPool.cpp
@@ -257,6 +258,19 @@ if(BUILD_TESTING)
   )
 
   target_include_directories(test_scan_cell_selector
+    PRIVATE
+      include
+  )
+
+  ament_add_gtest(test_small_hole_filler
+    test/SmallHoleFillerTest.cpp
+  )
+
+  target_link_libraries(test_small_hole_filler
+    ${PROJECT_NAME}_library
+  )
+
+  target_include_directories(test_small_hole_filler
     PRIVATE
       include
   )

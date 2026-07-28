@@ -45,6 +45,10 @@ elevation_mapping:
     visibility_cleanup_rate: 2.0
     enable_continuous_cleanup: false
     scanning_duration: 1.0
+    enable_small_hole_filling: true
+    small_hole_max_size: 4
+    small_hole_min_support: 4
+    small_hole_max_height_range: 0.05
 
     initialize_elevation_map: false
     initialization_method: 0

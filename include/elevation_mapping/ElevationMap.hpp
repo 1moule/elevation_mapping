@@ -27,6 +27,7 @@
 // Elevation Mapping
 #include "elevation_mapping/PointXYZRGBConfidenceRatio.hpp"
 #include "elevation_mapping/postprocessing/PostprocessorPool.hpp"
+#include "elevation_mapping/SmallHoleFiller.hpp"
 
 namespace elevation_mapping {
 
@@ -328,6 +329,8 @@ class ElevationMap {
   bool enableContinuousCleanup_;
   double visibilityCleanupDuration_;
   double scanningDuration_;
+  bool enableSmallHoleFilling_;
+  SmallHoleFillingParameters smallHoleFillingParameters_;
 };
 
 }  // namespace elevation_mapping

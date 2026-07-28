@@ -17,6 +17,7 @@
 #include "elevation_mapping/ElevationMapFunctors.hpp"
 #include "elevation_mapping/PointXYZRGBConfidenceRatio.hpp"
 #include "elevation_mapping/ScanCellSelector.hpp"
+#include "elevation_mapping/SmallHoleFiller.hpp"
 #include "elevation_mapping/WeightedEmpiricalCumulativeDistributionFunction.hpp"
 
 namespace {
@@ -52,7 +53,21 @@ ElevationMap::ElevationMap(std::shared_ptr<rclcpp::Node> nodeHandle)
       enableVisibilityCleanup_(true),
       enableContinuousCleanup_(false),
       visibilityCleanupDuration_(0.0),
-      scanningDuration_(1.0) {
+      scanningDuration_(1.0),
+      enableSmallHoleFilling_(true),
+      smallHoleFillingParameters_{4u, 4u, 0.05f} {
+  nodeHandle_->declare_parameter("enable_small_hole_filling", true);
+  nodeHandle_->declare_parameter("small_hole_max_size", 4);
+  nodeHandle_->declare_parameter("small_hole_min_support", 4);
+  nodeHandle_->declare_parameter("small_hole_max_height_range", 0.05);
+  nodeHandle_->get_parameter("enable_small_hole_filling", enableSmallHoleFilling_);
+  int maxHoleSize;
+  int minSupport;
+  nodeHandle_->get_parameter("small_hole_max_size", maxHoleSize);
+  nodeHandle_->get_parameter("small_hole_min_support", minSupport);
+  nodeHandle_->get_parameter("small_hole_max_height_range", smallHoleFillingParameters_.maxHeightRange);
+  smallHoleFillingParameters_.maxHoleSize = static_cast<std::size_t>(maxHoleSize);
+  smallHoleFillingParameters_.minSupport = static_cast<std::size_t>(minSupport);
   rawMap_.setBasicLayers({"elevation", "variance"});
   fusedMap_.setBasicLayers({"elevation", "upper_bound", "lower_bound"});
   clear();
@@ -573,6 +588,9 @@ bool ElevationMap::publishFusedElevationMap() {
   boost::recursive_mutex::scoped_lock scopedLock(fusedMapMutex_);
   grid_map::GridMap fusedMapCopy = fusedMap_;
   scopedLock.unlock();
+  if (enableSmallHoleFilling_) {
+    fillSmallElevationHoles(fusedMapCopy, smallHoleFillingParameters_);
+  }
   fusedMapCopy.add("uncertainty_range", fusedMapCopy.get("upper_bound") - fusedMapCopy.get("lower_bound"));
   std::unique_ptr<grid_map_msgs::msg::GridMap> message;
   message = grid_map::GridMapRosConverter::toMessage(fusedMapCopy);
