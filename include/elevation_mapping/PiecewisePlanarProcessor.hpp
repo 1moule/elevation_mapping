@@ -14,6 +14,8 @@ struct PiecewisePlanarParameters {
   float maxOcclusionDistance;
   std::size_t minOcclusionSupport;
   float inferredHalfRange;
+  bool enableDirectionalGroundCompletion;
+  float directionalGroundMaxGapWidth;
 };
 
 struct PiecewisePlanarResult {

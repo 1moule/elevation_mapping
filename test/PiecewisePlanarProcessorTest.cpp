@@ -29,6 +29,15 @@ grid_map::GridMap makeMap(const int xCells, const int yCells) {
   return map;
 }
 
+grid_map::GridMap makeMap(const int xCells, const int yCells,
+                          const grid_map::Position& center) {
+  grid_map::GridMap map({"elevation", "upper_bound", "lower_bound"});
+  map.setGeometry(grid_map::Length(kResolution * xCells,
+                                   kResolution * yCells),
+                  kResolution, center);
+  return map;
+}
+
 grid_map::Index indexAt(const grid_map::GridMap& map, double x, double y) {
   grid_map::Index index;
   EXPECT_TRUE(map.getIndex(grid_map::Position(x, y), index));
@@ -59,12 +68,20 @@ void addNoisyPlane(grid_map::GridMap& map) {
 }
 
 PiecewisePlanarParameters defaultParameters() {
-  return {0.05f, 4u, 0.03f, 0.03f, 0.1f, 1u, 0.1f};
+  return {0.05f, 4u, 0.03f, 0.03f, 0.1f, 1u, 0.1f, false, 0.0f};
 }
 
 PiecewisePlanarParameters occlusionParameters() {
   auto parameters = defaultParameters();
   parameters.inferredHalfRange = 0.05f;
+  return parameters;
+}
+
+PiecewisePlanarParameters directionalParameters() {
+  auto parameters = occlusionParameters();
+  parameters.maxOcclusionDistance = kResolution;
+  parameters.enableDirectionalGroundCompletion = true;
+  parameters.directionalGroundMaxGapWidth = 0.40f;
   return parameters;
 }
 
@@ -74,6 +91,24 @@ void addFlatPatch(grid_map::GridMap& map, const int firstX, const int lastX,
     for (int y = firstY; y <= lastY; ++y) {
       setSample(map, grid_map::Index(x, y), elevation);
     }
+  }
+}
+
+void addFlatPatchInRectangle(grid_map::GridMap& map, const double minimumX,
+                             const double maximumX, const double minimumY,
+                             const double maximumY, const float elevation) {
+  for (grid_map::GridMapIterator iterator(map); !iterator.isPastEnd();
+       ++iterator) {
+    grid_map::Position position;
+    ASSERT_TRUE(map.getPosition(*iterator, position));
+    constexpr double kBoundaryTolerance = 1.0e-9;
+    if (position.x() < minimumX - kBoundaryTolerance ||
+        position.x() > maximumX + kBoundaryTolerance ||
+        position.y() < minimumY - kBoundaryTolerance ||
+        position.y() > maximumY + kBoundaryTolerance) {
+      continue;
+    }
+    setSample(map, *iterator, elevation);
   }
 }
 
@@ -136,6 +171,41 @@ void expectMapEqual(const grid_map::GridMap& expected,
                     actual.at("upper_bound", *iterator));
     EXPECT_FLOAT_EQ(expected.at("lower_bound", *iterator),
                     actual.at("lower_bound", *iterator));
+  }
+}
+
+void expectCellsInRectangleHaveHeight(const grid_map::GridMap& map,
+                                      const double minimumX,
+                                      const double maximumX,
+                                      const double minimumY,
+                                      const double maximumY,
+                                      const float elevation) {
+  for (grid_map::GridMapIterator iterator(map); !iterator.isPastEnd();
+       ++iterator) {
+    grid_map::Position position;
+    ASSERT_TRUE(map.getPosition(*iterator, position));
+    if (position.x() < minimumX || position.x() > maximumX ||
+        position.y() < minimumY || position.y() > maximumY) {
+      continue;
+    }
+    EXPECT_NEAR(map.at("elevation", *iterator), elevation, 1.0e-5);
+  }
+}
+
+void expectCellsInRectangleInvalid(const grid_map::GridMap& map,
+                                   const double minimumX,
+                                   const double maximumX,
+                                   const double minimumY,
+                                   const double maximumY) {
+  for (grid_map::GridMapIterator iterator(map); !iterator.isPastEnd();
+       ++iterator) {
+    grid_map::Position position;
+    ASSERT_TRUE(map.getPosition(*iterator, position));
+    if (position.x() < minimumX || position.x() > maximumX ||
+        position.y() < minimumY || position.y() > maximumY) {
+      continue;
+    }
+    EXPECT_FALSE(std::isfinite(map.at("elevation", *iterator)));
   }
 }
 
@@ -385,6 +455,420 @@ TEST(PiecewisePlanarProcessorTest, InferredCellsDoNotPropagate) {
   const grid_map::Index distantUnknown(0, 0);
   EXPECT_GT(nearestOriginalSupportDistance(support, distantUnknown), 0.12);
   EXPECT_FALSE(std::isfinite(output.at("elevation", distantUnknown)));
+}
+
+TEST(PiecewisePlanarProcessorTest, RejectsExactlyCollinearPlaneSupport) {
+  auto support = makeMap(12, 1);
+  addFlatPatch(support, 0, 11, 0, 0, 0.20f);
+  auto output = support;
+
+  const auto result = processPiecewisePlanarElevation(
+      support, output, defaultParameters());
+
+  EXPECT_EQ(result.acceptedPlanes, 0u);
+  EXPECT_EQ(result.regularizedCells, 0u);
+}
+
+TEST(PiecewisePlanarProcessorTest, RejectsNearCollinearPlaneSupport) {
+  auto support = makeMap(14, 14);
+  for (int diagonal = 1; diagonal <= 12; ++diagonal) {
+    setSample(support, grid_map::Index(diagonal, diagonal), 0.20f);
+  }
+  setSample(support, grid_map::Index(6, 7), 0.20f);
+  auto output = support;
+  auto parameters = defaultParameters();
+  parameters.minRegionSize = 10u;
+
+  const auto result =
+      processPiecewisePlanarElevation(support, output, parameters);
+
+  EXPECT_EQ(result.acceptedPlanes, 0u);
+  EXPECT_EQ(result.regularizedCells, 0u);
+}
+
+TEST(PiecewisePlanarProcessorTest,
+     PairsPlanesAcrossWholeCandidateComponent) {
+  auto support = makeMap(12, 5);
+  addFlatPatch(support, 0, 3, 0, 4, 0.0f);
+  addFlatPatch(support, 8, 11, 0, 4, 0.30f);
+  auto output = support;
+  auto parameters = occlusionParameters();
+  parameters.maxOcclusionDistance = 0.081f;
+
+  const auto result =
+      processPiecewisePlanarElevation(support, output, parameters);
+
+  EXPECT_EQ(result.inferredCells, 20u);
+  for (int x = 4; x <= 7; ++x) {
+    for (int y = 0; y <= 4; ++y) {
+      expectInferredCellAtOneOfHeights(output, grid_map::Index(x, y), 0.0f,
+                                       0.30f);
+    }
+  }
+}
+
+TEST(PiecewisePlanarProcessorTest,
+     RejectsDistinctPlanesContactingComponentFromSameSide) {
+  auto support = makeMap(9, 6);
+  addFlatPatch(support, 0, 2, 0, 2, 0.0f);
+  addFlatPatch(support, 0, 2, 3, 5, 0.30f);
+  auto output = support;
+  auto parameters = occlusionParameters();
+  parameters.maxOcclusionDistance = 0.13f;
+
+  const auto result =
+      processPiecewisePlanarElevation(support, output, parameters);
+
+  EXPECT_EQ(result.inferredCells, 0u);
+}
+
+TEST(PiecewisePlanarProcessorTest, RejectsOutsidePlatformCorner) {
+  auto support = makeMap(6, 6);
+  addFlatPatch(support, 0, 2, 3, 5, 0.0f);
+  addFlatPatch(support, 3, 5, 0, 2, 0.30f);
+  auto output = support;
+  auto parameters = occlusionParameters();
+  parameters.maxOcclusionDistance = 0.13f;
+
+  const auto result =
+      processPiecewisePlanarElevation(support, output, parameters);
+
+  EXPECT_EQ(result.inferredCells, 0u);
+}
+
+TEST(PiecewisePlanarProcessorTest,
+     RejectsAdjacentNonBracketingSurfaces) {
+  auto support = makeMap(8, 6);
+  addFlatPatch(support, 0, 3, 0, 2, 0.0f);
+  addFlatPatch(support, 4, 7, 0, 2, 0.30f);
+  auto output = support;
+  auto parameters = occlusionParameters();
+  parameters.maxOcclusionDistance = 0.13f;
+
+  const auto result =
+      processPiecewisePlanarElevation(support, output, parameters);
+
+  EXPECT_EQ(result.inferredCells, 0u);
+}
+
+TEST(PiecewisePlanarProcessorTest,
+     EqualDistanceTieIsIndependentOfSupportStartIndex) {
+  auto canonicalSupport = makeMap(9, 5);
+  addFlatPatch(canonicalSupport, 0, 3, 0, 4, 0.0f);
+  addFlatPatch(canonicalSupport, 5, 8, 0, 4, 0.30f);
+  auto rolledSupport = canonicalSupport;
+  const grid_map::Position originalPosition = rolledSupport.getPosition();
+  ASSERT_TRUE(rolledSupport.move(
+      originalPosition + grid_map::Position(4.0 * kResolution, 0.0)));
+  rolledSupport.setPosition(originalPosition);
+  ASSERT_FALSE(
+      (canonicalSupport.getStartIndex() == rolledSupport.getStartIndex()).all());
+  copyLayersByPosition(canonicalSupport, rolledSupport);
+  auto canonicalOutput = canonicalSupport;
+  auto rolledOutput = rolledSupport;
+  auto parameters = occlusionParameters();
+  parameters.maxOcclusionDistance = 0.05f;
+
+  const auto canonicalResult = processPiecewisePlanarElevation(
+      canonicalSupport, canonicalOutput, parameters);
+  const auto rolledResult = processPiecewisePlanarElevation(
+      rolledSupport, rolledOutput, parameters);
+
+  const grid_map::Index canonicalTarget(4, 2);
+  grid_map::Position targetPosition;
+  ASSERT_TRUE(canonicalSupport.getPosition(canonicalTarget, targetPosition));
+  grid_map::Index rolledTarget;
+  ASSERT_TRUE(rolledSupport.getIndex(targetPosition, rolledTarget));
+  EXPECT_EQ(canonicalResult.inferredCells, 5u);
+  EXPECT_EQ(rolledResult.inferredCells, 5u);
+  EXPECT_FLOAT_EQ(canonicalOutput.at("elevation", canonicalTarget),
+                  rolledOutput.at("elevation", rolledTarget));
+}
+
+TEST(PiecewisePlanarProcessorTest, HandlesExtremeFiniteSearchRadius) {
+  auto support = makeMap(9, 5);
+  addFlatPatch(support, 0, 3, 0, 4, 0.0f);
+  addFlatPatch(support, 5, 8, 0, 4, 0.30f);
+  auto output = support;
+  auto parameters = occlusionParameters();
+  parameters.maxOcclusionDistance = std::numeric_limits<float>::max();
+
+  const auto result =
+      processPiecewisePlanarElevation(support, output, parameters);
+
+  EXPECT_EQ(result.inferredCells, 5u);
+  for (int y = 0; y <= 4; ++y) {
+    expectInferredCellAtOneOfHeights(output, grid_map::Index(4, y), 0.0f,
+                                     0.30f);
+  }
+}
+
+TEST(PiecewisePlanarProcessorTest,
+     DirectionalCompletionFillsDescendingGapWithLowerPlane) {
+  auto support = makeMap(30, 5);
+  addFlatPatchInRectangle(support, 0.06, 0.18, -0.08, 0.08, 0.30f);
+  addFlatPatchInRectangle(support, 0.34, 0.46, -0.08, 0.08, 0.10f);
+  auto output = support;
+
+  const auto result = processPiecewisePlanarElevation(
+      support, output, directionalParameters());
+
+  EXPECT_EQ(result.inferredCells, 20u);
+  for (grid_map::GridMapIterator iterator(support); !iterator.isPastEnd();
+       ++iterator) {
+    grid_map::Position position;
+    ASSERT_TRUE(support.getPosition(*iterator, position));
+    if (position.x() < 0.20 || position.x() > 0.28) {
+      continue;
+    }
+    grid_map::Index outputIndex;
+    ASSERT_TRUE(output.getIndex(position, outputIndex));
+    EXPECT_NEAR(output.at("elevation", outputIndex), 0.10, 1.0e-5);
+    EXPECT_NEAR(output.at("upper_bound", outputIndex) -
+                    output.at("elevation", outputIndex),
+                0.05, 1.0e-5);
+    EXPECT_NEAR(output.at("elevation", outputIndex) -
+                    output.at("lower_bound", outputIndex),
+                0.05, 1.0e-5);
+  }
+}
+
+TEST(PiecewisePlanarProcessorTest,
+     DisabledDirectionalCompletionPreservesConservativeResult) {
+  auto support = makeMap(30, 5);
+  addFlatPatchInRectangle(support, 0.06, 0.18, -0.08, 0.08, 0.30f);
+  addFlatPatchInRectangle(support, 0.34, 0.46, -0.08, 0.08, 0.10f);
+  auto output = support;
+  auto parameters = directionalParameters();
+  parameters.enableDirectionalGroundCompletion = false;
+
+  const auto result = processPiecewisePlanarElevation(support, output, parameters);
+
+  EXPECT_EQ(result.inferredCells, 0u);
+  for (grid_map::GridMapIterator iterator(support); !iterator.isPastEnd();
+       ++iterator) {
+    grid_map::Position position;
+    ASSERT_TRUE(support.getPosition(*iterator, position));
+    if (position.x() < 0.20 || position.x() > 0.28) {
+      continue;
+    }
+    grid_map::Index outputIndex;
+    ASSERT_TRUE(output.getIndex(position, outputIndex));
+    EXPECT_FALSE(std::isfinite(output.at("elevation", outputIndex)));
+  }
+}
+
+TEST(PiecewisePlanarProcessorTest,
+     DirectionalCompletionDoesNotTriggerWhenAscending) {
+  auto support = makeMap(30, 5);
+  addFlatPatchInRectangle(support, 0.06, 0.18, -0.08, 0.08, 0.10f);
+  addFlatPatchInRectangle(support, 0.34, 0.46, -0.08, 0.08, 0.30f);
+  auto output = support;
+
+  const auto result = processPiecewisePlanarElevation(
+      support, output, directionalParameters());
+
+  EXPECT_EQ(result.inferredCells, 0u);
+  expectCellsInRectangleInvalid(output, 0.20, 0.32, -0.08, 0.08);
+}
+
+TEST(PiecewisePlanarProcessorTest,
+     DirectionalCompletionUsesMapCenterAsObserverXY) {
+  auto nearSupport = makeMap(30, 5, grid_map::Position(0.0, 0.0));
+  auto farSupport = makeMap(30, 5, grid_map::Position(0.50, 0.0));
+  for (auto* support : {&nearSupport, &farSupport}) {
+    addFlatPatchInRectangle(*support, 0.06, 0.18, -0.08, 0.08, 0.30f);
+    addFlatPatchInRectangle(*support, 0.34, 0.46, -0.08, 0.08, 0.10f);
+  }
+  auto nearOutput = nearSupport;
+  auto farOutput = farSupport;
+
+  const auto nearResult = processPiecewisePlanarElevation(
+      nearSupport, nearOutput, directionalParameters());
+  const auto farResult = processPiecewisePlanarElevation(
+      farSupport, farOutput, directionalParameters());
+
+  EXPECT_GT(nearResult.inferredCells, 0u);
+  expectCellsInRectangleHaveHeight(nearOutput, 0.20, 0.32, -0.08, 0.08,
+                                    0.10f);
+  EXPECT_EQ(farResult.inferredCells, 0u);
+  expectCellsInRectangleInvalid(farOutput, 0.20, 0.32, -0.08, 0.08);
+}
+
+TEST(PiecewisePlanarProcessorTest,
+     DirectionalCompletionRejectsGapWiderThanMaximum) {
+  auto support = makeMap(50, 5);
+  addFlatPatchInRectangle(support, 0.06, 0.18, -0.08, 0.08, 0.30f);
+  addFlatPatchInRectangle(support, 0.70, 0.82, -0.08, 0.08, 0.10f);
+  auto output = support;
+
+  const auto result = processPiecewisePlanarElevation(
+      support, output, directionalParameters());
+
+  EXPECT_EQ(result.inferredCells, 0u);
+  expectCellsInRectangleInvalid(output, 0.34, 0.62, -0.08, 0.08);
+}
+
+TEST(PiecewisePlanarProcessorTest,
+     DirectionalCompletionRequiresObservedLowerPlane) {
+  auto support = makeMap(30, 5);
+  addFlatPatchInRectangle(support, 0.06, 0.18, -0.08, 0.08, 0.30f);
+  auto output = support;
+
+  const auto result = processPiecewisePlanarElevation(
+      support, output, directionalParameters());
+
+  EXPECT_EQ(result.inferredCells, 0u);
+  expectCellsInRectangleInvalid(output, 0.20, 0.46, -0.08, 0.08);
+}
+
+TEST(PiecewisePlanarProcessorTest,
+     DirectionalCompletionRejectsCellsBesideSupportSegment) {
+  auto support = makeMap(30, 5);
+  addFlatPatchInRectangle(support, 0.06, 0.18, -0.08, -0.04, 0.30f);
+  addFlatPatchInRectangle(support, 0.34, 0.46, -0.08, -0.04, 0.10f);
+  auto output = support;
+
+  processPiecewisePlanarElevation(support, output, directionalParameters());
+
+  expectCellsInRectangleInvalid(output, 0.20, 0.32, 0.04, 0.08);
+}
+
+TEST(PiecewisePlanarProcessorTest,
+     DirectionalCompletionDoesNotPropagateInferredCells) {
+  auto support = makeMap(30, 5);
+  addFlatPatchInRectangle(support, 0.06, 0.18, -0.08, 0.08, 0.30f);
+  addFlatPatchInRectangle(support, 0.34, 0.46, -0.08, 0.08, 0.10f);
+  auto output = support;
+
+  processPiecewisePlanarElevation(support, output, directionalParameters());
+
+  expectCellsInRectangleInvalid(output, 0.50, 0.58, -0.08, 0.08);
+}
+
+TEST(PiecewisePlanarProcessorTest,
+     DirectionalCompletionHandlesTwoPlatformsInWideView) {
+  auto support = makeMap(30, 5);
+  addFlatPatchInRectangle(support, 0.06, 0.18, -0.08, -0.04, 0.30f);
+  addFlatPatchInRectangle(support, 0.34, 0.46, -0.08, -0.04, 0.10f);
+  addFlatPatchInRectangle(support, 0.06, 0.18, 0.04, 0.08, 0.50f);
+  addFlatPatchInRectangle(support, 0.34, 0.46, 0.04, 0.08, 0.20f);
+  auto output = support;
+
+  processPiecewisePlanarElevation(support, output, directionalParameters());
+
+  expectCellsInRectangleHaveHeight(output, 0.20, 0.32, -0.08, -0.04, 0.10f);
+  expectCellsInRectangleHaveHeight(output, 0.20, 0.32, 0.04, 0.08, 0.20f);
+}
+
+TEST(PiecewisePlanarProcessorTest,
+     DirectionalCompletionKeepsMultipleStairLevelsSeparate) {
+  auto support = makeMap(40, 5);
+  addFlatPatchInRectangle(support, 0.06, 0.18, -0.08, 0.08, 0.50f);
+  addFlatPatchInRectangle(support, 0.34, 0.46, -0.08, 0.08, 0.30f);
+  addFlatPatchInRectangle(support, 0.62, 0.74, -0.08, 0.08, 0.10f);
+  auto output = support;
+
+  processPiecewisePlanarElevation(support, output, directionalParameters());
+
+  expectCellsInRectangleHaveHeight(output, 0.20, 0.32, -0.08, 0.08, 0.30f);
+  expectCellsInRectangleHaveHeight(output, 0.48, 0.60, -0.08, 0.08, 0.10f);
+}
+
+TEST(PiecewisePlanarProcessorTest,
+     DirectionalCompletionPairTieIsDeterministic) {
+  auto support = makeMap(30, 7);
+  const auto highFirst = indexAt(support, 0.06, 0.0);
+  const auto highLast = indexAt(support, 0.18, 0.0);
+  const auto lowFirst = indexAt(support, 0.34, 0.0);
+  const auto lowLast = indexAt(support, 0.46, 0.0);
+  const auto target = indexAt(support, 0.26, 0.0);
+  ASSERT_GE(target(1), 3);
+  ASSERT_LT(target(1) + 3, support.getSize()(1));
+  addFlatPatch(support, std::min(highFirst(0), highLast(0)),
+               std::max(highFirst(0), highLast(0)), target(1) - 3,
+               target(1) - 2, 0.30f);
+  addFlatPatch(support, std::min(highFirst(0), highLast(0)),
+               std::max(highFirst(0), highLast(0)), target(1) + 2,
+               target(1) + 3, 0.25f);
+  addFlatPatch(support, std::min(lowFirst(0), lowLast(0)),
+               std::max(lowFirst(0), lowLast(0)), target(1) - 1,
+               target(1) + 1, 0.10f);
+  auto firstOutput = support;
+  auto secondOutput = support;
+
+  const auto firstResult = processPiecewisePlanarElevation(
+      support, firstOutput, directionalParameters());
+  processPiecewisePlanarElevation(support, secondOutput, directionalParameters());
+
+  EXPECT_EQ(firstResult.acceptedPlanes, 3u);
+  EXPECT_TRUE(std::isfinite(firstOutput.at("elevation", target)));
+  EXPECT_FLOAT_EQ(firstOutput.at("elevation", target),
+                  secondOutput.at("elevation", target));
+}
+
+TEST(PiecewisePlanarProcessorTest,
+     DirectionalCompletionWritesByPhysicalPosition) {
+  auto support = makeMap(30, 5);
+  addFlatPatchInRectangle(support, 0.06, 0.18, -0.08, 0.08, 0.30f);
+  addFlatPatchInRectangle(support, 0.34, 0.46, -0.08, 0.08, 0.10f);
+  auto output = support;
+  const grid_map::Position originalPosition = output.getPosition();
+  ASSERT_TRUE(output.move(originalPosition +
+                          grid_map::Position(kResolution, 0.0)));
+  output.setPosition(originalPosition);
+  ASSERT_FALSE((support.getStartIndex() == output.getStartIndex()).all());
+  copyLayersByPosition(support, output);
+
+  const auto result = processPiecewisePlanarElevation(
+      support, output, directionalParameters());
+
+  EXPECT_EQ(result.inferredCells, 20u);
+  expectCellsInRectangleHaveHeight(output, 0.20, 0.32, -0.08, 0.08, 0.10f);
+}
+
+TEST(PiecewisePlanarProcessorTest,
+     DirectionalCompletionCountsConservativeOverlapOnce) {
+  auto support = makeMap(30, 5);
+  const auto highFirst = indexAt(support, 0.06, 0.0);
+  const auto highLast = indexAt(support, 0.18, 0.0);
+  const auto lowFirst = indexAt(support, 0.26, 0.0);
+  const auto lowLast = indexAt(support, 0.38, 0.0);
+  addFlatPatch(support, std::min(highFirst(0), highLast(0)),
+               std::max(highFirst(0), highLast(0)), 0, 4, 0.30f);
+  addFlatPatch(support, std::min(lowFirst(0), lowLast(0)),
+               std::max(lowFirst(0), lowLast(0)), 0, 4, 0.10f);
+  auto output = support;
+  auto parameters = directionalParameters();
+  parameters.maxOcclusionDistance = 0.10f;
+
+  const auto result = processPiecewisePlanarElevation(support, output, parameters);
+
+  EXPECT_EQ(result.inferredCells, 5u);
+  const auto gap = indexAt(output, 0.22, 0.0);
+  EXPECT_NEAR(output.at("elevation", gap), 0.10, 1.0e-5);
+}
+
+TEST(PiecewisePlanarProcessorTest,
+     InvalidDirectionalWidthPreservesConservativeCompletion) {
+  auto support = makeMap(10, 5);
+  addFlatPatch(support, 0, 3, 0, 4, 0.0f);
+  addFlatPatch(support, 6, 9, 0, 4, 0.30f);
+  auto output = support;
+  auto parameters = occlusionParameters();
+  parameters.enableDirectionalGroundCompletion = true;
+  parameters.directionalGroundMaxGapWidth =
+      std::numeric_limits<float>::quiet_NaN();
+
+  const auto result = processPiecewisePlanarElevation(support, output, parameters);
+
+  EXPECT_EQ(result.inferredCells, 10u);
+  for (int x = 4; x <= 5; ++x) {
+    for (int y = 0; y <= 4; ++y) {
+      expectInferredCellAtOneOfHeights(output, grid_map::Index(x, y), 0.0f,
+                                       0.30f);
+    }
+  }
 }
 
 }  // namespace
