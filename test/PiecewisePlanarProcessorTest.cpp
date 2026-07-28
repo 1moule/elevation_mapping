@@ -834,6 +834,8 @@ TEST(PiecewisePlanarProcessorTest,
   auto support = makeMap(30, 5);
   addFlatPatchInRectangle(support, 0.06, 0.18, -0.08, 0.08, 0.30f);
   addFlatPatchInRectangle(support, 0.34, 0.46, -0.08, 0.08, 0.10f);
+  const auto noisyHighSample = indexAt(support, 0.10, 0.0);
+  setSample(support, noisyHighSample, 0.32f);
   const std::vector<float> invalidWidths{
       std::numeric_limits<float>::quiet_NaN(), 0.0f, -0.40f};
 
@@ -846,6 +848,8 @@ TEST(PiecewisePlanarProcessorTest,
         processPiecewisePlanarElevation(support, output, parameters);
 
     EXPECT_EQ(result.inferredCells, 0u);
+    EXPECT_GT(result.regularizedCells, 0u);
+    EXPECT_LT(output.at("elevation", noisyHighSample), 0.31f);
     expectCellsInRectangleInvalid(output, 0.20, 0.32, -0.08, 0.08);
   }
 }
