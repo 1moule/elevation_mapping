@@ -1,6 +1,8 @@
 #include "elevation_mapping/SmallHoleFiller.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <set>
 #include <utility>
 #include <vector>
@@ -12,6 +14,10 @@ namespace {
 
 using IndexKey = std::pair<int, int>;
 using IndexSet = std::set<IndexKey>;
+
+constexpr std::size_t kHardMaximumHoleSize = 4u;
+constexpr std::size_t kHardMinimumSupport = 4u;
+constexpr float kHardMaximumHeightRange = 0.05f;
 
 IndexKey makeKey(const grid_map::Index& index) {
   return {index(0), index(1)};
@@ -90,6 +96,16 @@ std::size_t fillSmallElevationHoles(
     return 0u;
   }
 
+  const std::size_t maximumHoleSize =
+      std::min(parameters.maxHoleSize, kHardMaximumHoleSize);
+  const std::size_t minimumSupport =
+      std::max(parameters.minSupport, kHardMinimumSupport);
+  float maximumHeightRange =
+      std::min(parameters.maxHeightRange, kHardMaximumHeightRange);
+  if (!std::isfinite(maximumHeightRange)) {
+    maximumHeightRange = -std::numeric_limits<float>::infinity();
+  }
+
   const grid_map::GridMap originalMap = map;
   std::vector<std::vector<grid_map::Index>> components;
   IndexSet visited;
@@ -105,7 +121,7 @@ std::size_t fillSmallElevationHoles(
 
   std::size_t filled = 0u;
   for (const auto& component : components) {
-    if (component.size() > parameters.maxHoleSize) {
+    if (component.size() > maximumHoleSize) {
       continue;
     }
 
@@ -122,7 +138,7 @@ std::size_t fillSmallElevationHoles(
         support.push_back(neighbor);
       }
     }
-    if (support.empty() || support.size() < parameters.minSupport) {
+    if (support.empty() || support.size() < minimumSupport) {
       continue;
     }
 
@@ -140,7 +156,7 @@ std::size_t fillSmallElevationHoles(
     const auto elevationRange =
         std::minmax_element(elevations.begin(), elevations.end());
     if (*elevationRange.second - *elevationRange.first >
-        parameters.maxHeightRange) {
+        maximumHeightRange) {
       continue;
     }
 

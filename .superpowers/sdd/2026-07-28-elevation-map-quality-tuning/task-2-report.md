@@ -136,3 +136,57 @@ No changes were made for those pre-existing failures.
   not a build or test failure.
 - The input-source suite retains its six known pre-existing failures described
   above.
+
+## Fix Round 1/5: Hard Safety Bounds
+
+Runtime overrides previously flowed directly into the component-size,
+support-count, and height-range fill gates. `SmallHoleFiller.cpp` now enforces
+hard limits at the filler boundary:
+
+- maximum hole size: `min(requested, 4)`
+- minimum support: `max(requested, 4)`
+- maximum height range: `min(requested, 0.05f)`
+
+Stricter overrides remain effective. A non-finite effective height-range value
+fails closed, rejecting the fill.
+
+### RED Evidence
+
+After adding the three regression tests, the required build succeeded:
+
+```bash
+colcon build --base-paths src/elevation_mapping \
+  --packages-select elevation_mapping \
+  --cmake-args -DCMAKE_BUILD_TYPE=Release
+```
+
+The pre-fix focused run failed exactly on the three permissive overrides:
+
+```bash
+./build/elevation_mapping/test_small_hole_filler
+```
+
+```text
+FAILED SmallHoleFillerTest.RejectsOversizedComponentDespiteLargerOverride
+FAILED SmallHoleFillerTest.RejectsUndersupportedHoleDespiteLowerOverride
+FAILED SmallHoleFillerTest.RejectsOverRangeHoleDespiteLargerOverride
+```
+
+The old implementation filled the oversized component, the three-support
+hole, and the `0.10 m` discontinuity when passed relaxed parameters.
+
+### GREEN Evidence
+
+After applying the hard-bound clamps, the same build command completed
+successfully. Final focused verification:
+
+```bash
+./build/elevation_mapping/test_small_hole_filler
+./build/elevation_mapping/test_scan_cell_selector
+```
+
+Results:
+
+- `test_small_hole_filler`: 7/7 passed, including all three hard-limit
+  regressions.
+- `test_scan_cell_selector`: 6/6 passed.

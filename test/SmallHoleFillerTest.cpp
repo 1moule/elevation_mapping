@@ -9,9 +9,9 @@
 namespace elevation_mapping {
 namespace {
 
-grid_map::GridMap makeMap() {
+grid_map::GridMap makeMap(double length = 5.0) {
   grid_map::GridMap map({"elevation", "upper_bound", "lower_bound"});
-  map.setGeometry(grid_map::Length(5.0, 5.0), 1.0,
+  map.setGeometry(grid_map::Length(length, length), 1.0,
                   grid_map::Position(0.0, 0.0));
   const float invalid = std::numeric_limits<float>::quiet_NaN();
   map["elevation"].setConstant(invalid);
@@ -88,6 +88,38 @@ TEST(SmallHoleFillerTest, RejectsComponentLargerThanMaximum) {
   EXPECT_FALSE(std::isfinite(map["lower_bound"](secondHole(0), secondHole(1))));
 }
 
+TEST(SmallHoleFillerTest, RejectsOversizedComponentDespiteLargerOverride) {
+  auto map = makeMap();
+  for (double x = -2.0; x <= 2.0; x += 1.0) {
+    setSample(map, x, 1.0, 0.02f, 10.0f, -10.0f);
+    setSample(map, x, -1.0, 0.02f, 10.0f, -10.0f);
+  }
+  auto parameters = defaultParameters();
+  parameters.maxHoleSize = 5u;
+
+  EXPECT_EQ(fillSmallElevationHoles(map, parameters), 0u);
+
+  const auto hole = indexAt(map, 0.0, 0.0);
+  EXPECT_FALSE(std::isfinite(map["elevation"](hole(0), hole(1))));
+}
+
+TEST(SmallHoleFillerTest, RejectsUndersupportedHoleDespiteLowerOverride) {
+  auto map = makeMap();
+  setSample(map, 0.0, 1.0, 0.02f, 10.0f, -10.0f);
+  setSample(map, 1.0, 0.0, 0.02f, 20.0f, -20.0f);
+  setSample(map, -1.0, 0.0, 0.02f, 30.0f, -30.0f);
+  setSample(map, 0.0, -1.0, 0.02f,
+            std::numeric_limits<float>::quiet_NaN(),
+            std::numeric_limits<float>::quiet_NaN());
+  auto parameters = defaultParameters();
+  parameters.minSupport = 3u;
+
+  EXPECT_EQ(fillSmallElevationHoles(map, parameters), 0u);
+
+  const auto hole = indexAt(map, 0.0, 0.0);
+  EXPECT_FALSE(std::isfinite(map["elevation"](hole(0), hole(1))));
+}
+
 TEST(SmallHoleFillerTest, RejectsHoleAcrossHeightDiscontinuity) {
   auto map = makeMap();
   setSample(map, 0.0, 1.0, 0.0f, 10.0f, -10.0f);
@@ -100,6 +132,21 @@ TEST(SmallHoleFillerTest, RejectsHoleAcrossHeightDiscontinuity) {
   EXPECT_FALSE(std::isfinite(map["elevation"](hole(0), hole(1))));
   EXPECT_FALSE(std::isfinite(map["upper_bound"](hole(0), hole(1))));
   EXPECT_FALSE(std::isfinite(map["lower_bound"](hole(0), hole(1))));
+}
+
+TEST(SmallHoleFillerTest, RejectsOverRangeHoleDespiteLargerOverride) {
+  auto map = makeMap();
+  setSample(map, 0.0, 1.0, 0.0f, 10.0f, -10.0f);
+  setSample(map, 1.0, 0.0, 0.1f, 20.0f, -20.0f);
+  setSample(map, 0.0, -1.0, 0.0f, 30.0f, -30.0f);
+  setSample(map, -1.0, 0.0, 0.1f, 40.0f, -40.0f);
+  auto parameters = defaultParameters();
+  parameters.maxHeightRange = 0.1f;
+
+  EXPECT_EQ(fillSmallElevationHoles(map, parameters), 0u);
+
+  const auto hole = indexAt(map, 0.0, 0.0);
+  EXPECT_FALSE(std::isfinite(map["elevation"](hole(0), hole(1))));
 }
 
 TEST(SmallHoleFillerTest, LeavesExistingElevationsUnchanged) {
