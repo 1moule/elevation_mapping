@@ -1,0 +1,55 @@
+elevation_mapping:
+  ros__parameters:
+    inputs: ["mid360_cloud"]
+    mid360_cloud:
+      type: pointcloud
+      topic: /fastlio2/body_cloud
+      queue_size: 1
+      publish_on_update: true
+      sensor_processor:
+        type: laser
+        min_radius: 0.02
+        beam_angle: 0.0006
+        beam_constant: 0.001
+        ignore_points_above: 0.0
+        ignore_points_below: -3.0
+        apply_voxelgrid_filter: true
+        voxelgrid_filter_size: 0.01
+
+    map_frame_id: world
+    robot_base_frame_id: body
+    robot_pose_with_covariance_topic: /fastlio2/lio_odom
+    robot_pose_cache_size: 200
+    track_point_frame_id: body
+    track_point_x: 0.0
+    track_point_y: 0.0
+    track_point_z: 0.0
+
+    min_update_rate: 2.0
+    time_tolerance: 0.5
+    length_in_x: 3.0
+    length_in_y: 3.0
+    position_x: 0.0
+    position_y: 0.0
+    resolution: 0.02
+
+    min_variance: 0.000009
+    max_variance: 0.01
+    min_horizontal_variance: 0.0001
+    max_horizontal_variance: 0.05
+    mahalanobis_distance_threshold: 2.5
+    multi_height_noise: 0.000009
+
+    fused_map_publishing_rate: 20.0
+    enable_visibility_cleanup: true
+    visibility_cleanup_rate: 2.0
+    enable_continuous_cleanup: false
+    scanning_duration: 1.0
+
+    initialize_elevation_map: false
+    initialization_method: 0
+    length_in_x_init_submap: 1.0
+    length_in_y_init_submap: 1.0
+    margin_init_submap: 0.3
+    init_submap_height_offset: 0.0
+    target_frame_init_submap: body
