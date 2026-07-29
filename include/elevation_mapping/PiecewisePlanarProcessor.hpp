@@ -6,6 +6,14 @@
 
 namespace elevation_mapping {
 
+enum class PiecewisePlanarConfidence : int {
+  None = 0,
+  Weak = 1,
+  StablePlane = 2,
+  HorizontalPlane = 3,
+  DirectionalCompletion = 4,
+};
+
 struct PiecewisePlanarParameters {
   float neighborHeightTolerance;
   std::size_t minRegionSize;
@@ -16,6 +24,7 @@ struct PiecewisePlanarParameters {
   float inferredHalfRange;
   bool enableDirectionalGroundCompletion;
   float directionalGroundMaxGapWidth;
+  float horizontalSnapMaxSlope;
 };
 
 struct PiecewisePlanarResult {
@@ -32,11 +41,13 @@ PiecewisePlanarResult processPiecewisePlanarElevationIfEnabled(
     const grid_map::GridMap& supportMap,
     grid_map::GridMap& outputMap,
     bool enabled,
-    const PiecewisePlanarParameters& parameters);
+    const PiecewisePlanarParameters& parameters,
+    grid_map::Matrix* confidence = nullptr);
 
 PiecewisePlanarResult processPiecewisePlanarElevation(
     const grid_map::GridMap& supportMap,
     grid_map::GridMap& outputMap,
-    const PiecewisePlanarParameters& parameters);
+    const PiecewisePlanarParameters& parameters,
+    grid_map::Matrix* confidence = nullptr);
 
 }  // namespace elevation_mapping

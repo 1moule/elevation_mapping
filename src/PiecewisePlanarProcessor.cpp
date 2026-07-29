@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <map>
 #include <set>
 #include <utility>
@@ -27,12 +28,14 @@ struct SupportCell {
 struct Plane {
   Eigen::Vector3d coefficients;
   double residualMad;
+  bool horizontalMode{false};
 };
 
 struct AcceptedPlane {
   std::size_t regionId;
   std::size_t directionalPlaneId;
   bool directionalEligible;
+  double radialVariance;
   Plane plane;
   std::vector<SupportCell> cells;
 };
@@ -45,6 +48,7 @@ struct PlaneCandidate {
   double directionalNearestSquaredDistance;
   grid_map::Position nearestSupportPosition;
   float predictedHeight;
+  double radialVariance;
 };
 
 struct CellOffset {
@@ -54,6 +58,17 @@ struct CellOffset {
 
 IndexKey makeKey(const grid_map::Index& index) {
   return {index(0), index(1)};
+}
+
+void markConfidence(grid_map::Matrix* confidence,
+                    const grid_map::Index& index,
+                    const PiecewisePlanarConfidence value) {
+  if (confidence == nullptr) {
+    return;
+  }
+  (*confidence)(index(0), index(1)) =
+      std::max((*confidence)(index(0), index(1)),
+               static_cast<float>(value));
 }
 
 PiecewisePlanarResult emptyResult() {
@@ -84,7 +99,9 @@ bool hasValidParameters(const PiecewisePlanarParameters& parameters) {
          std::isfinite(parameters.maxOcclusionDistance) &&
          parameters.maxOcclusionDistance > 0.0f &&
          std::isfinite(parameters.inferredHalfRange) &&
-         parameters.inferredHalfRange > 0.0f;
+         parameters.inferredHalfRange > 0.0f &&
+         std::isfinite(parameters.horizontalSnapMaxSlope) &&
+         parameters.horizontalSnapMaxSlope >= 0.0f;
 }
 
 bool hasValidDirectionalConfiguration(
@@ -169,6 +186,27 @@ bool hasSufficientTwoDimensionalSpan(
          kMinimumVarianceInResolutionSquared * resolution * resolution;
 }
 
+double radialVariance(const std::vector<SupportCell>& cells,
+                      const double resolution,
+                      const Eigen::Vector2d& centroid,
+                      const grid_map::Position& observer) {
+  Eigen::Vector2d radialDirection =
+      centroid - Eigen::Vector2d(observer.x(), observer.y());
+  if (radialDirection.norm() < resolution) {
+    return std::numeric_limits<double>::infinity();
+  }
+  radialDirection.normalize();
+
+  double variance = 0.0;
+  for (const auto& cell : cells) {
+    const Eigen::Vector2d centered(cell.x - centroid.x(),
+                                   cell.y - centroid.y());
+    const double projection = centered.dot(radialDirection);
+    variance += projection * projection;
+  }
+  return variance / static_cast<double>(cells.size());
+}
+
 bool isDirectionalPlaneEligible(const std::vector<SupportCell>& cells,
                                 const double resolution) {
   const Eigen::Vector2d centroid = supportCentroid(cells);
@@ -207,7 +245,41 @@ bool solveWeightedPlane(const std::vector<SupportCell>& cells,
   return decomposition.info() == Eigen::Success && coefficients.allFinite();
 }
 
-bool fitPlane(const std::vector<SupportCell>& cells, Plane& plane) {
+bool hasDominantHorizontalMode(const std::vector<SupportCell>& cells,
+                               const double modeTolerance,
+                               double& modeHeight) {
+  std::vector<double> heights;
+  heights.reserve(cells.size());
+  for (const auto& cell : cells) {
+    heights.push_back(cell.elevation);
+  }
+  modeHeight = median(std::move(heights));
+
+  std::size_t centralCount = 0u;
+  std::size_t lowerCount = 0u;
+  std::size_t upperCount = 0u;
+  for (const auto& cell : cells) {
+    if (cell.elevation < modeHeight - modeTolerance) {
+      ++lowerCount;
+    } else if (cell.elevation > modeHeight + modeTolerance) {
+      ++upperCount;
+    } else {
+      ++centralCount;
+    }
+  }
+
+  const std::size_t dominantTail = std::max(lowerCount, upperCount);
+  const std::size_t oppositeTail = std::min(lowerCount, upperCount);
+  return centralCount * 5u >= cells.size() * 3u &&
+         dominantTail >= std::max<std::size_t>(3u, cells.size() / 10u) &&
+         dominantTail >= oppositeTail * 3u;
+}
+
+bool fitPlane(const std::vector<SupportCell>& cells,
+              const double horizontalModeTolerance,
+              const double horizontalSnapMaxSlope,
+              Plane& plane) {
+  plane.horizontalMode = false;
   std::vector<double> weights(cells.size(), 1.0);
   if (!solveWeightedPlane(cells, weights, plane.coefficients)) {
     return false;
@@ -231,6 +303,20 @@ bool fitPlane(const std::vector<SupportCell>& cells, Plane& plane) {
   }
 
   plane.residualMad = residualMad(cells, plane.coefficients);
+  double horizontalHeight = 0.0;
+  if (hasDominantHorizontalMode(cells, horizontalModeTolerance,
+                                horizontalHeight)) {
+    plane.coefficients = Eigen::Vector3d(0.0, 0.0, horizontalHeight);
+    plane.residualMad = residualMad(cells, plane.coefficients);
+    plane.horizontalMode = true;
+  } else {
+    plane.horizontalMode =
+        plane.coefficients.head<2>().norm() <= horizontalSnapMaxSlope;
+    if (plane.horizontalMode) {
+      plane.coefficients = Eigen::Vector3d(0.0, 0.0, horizontalHeight);
+      plane.residualMad = residualMad(cells, plane.coefficients);
+    }
+  }
   return std::isfinite(plane.residualMad);
 }
 
@@ -307,13 +393,19 @@ std::vector<AcceptedPlane> findAcceptedPlanes(
       region.push_back(supportCells[index]);
     }
     Plane plane;
-    if (fitPlane(region, plane) &&
+    if (fitPlane(region, 0.5 * parameters.maxRegionMad,
+                 parameters.horizontalSnapMaxSlope, plane) &&
         plane.residualMad <= parameters.maxRegionMad) {
       const bool directionalEligible =
           hasValidDirectionalConfiguration(parameters) &&
           isDirectionalPlaneEligible(region, supportMap.getResolution());
+      const Eigen::Vector2d centroid = supportCentroid(region);
+      const double regionRadialVariance =
+          radialVariance(region, supportMap.getResolution(), centroid,
+                         supportMap.getPosition());
       acceptedPlanes.push_back(
-          {regionId, 0u, directionalEligible, plane, std::move(region)});
+          {regionId, 0u, directionalEligible, regionRadialVariance, plane,
+           std::move(region)});
     }
     ++regionId;
   }
@@ -478,7 +570,8 @@ std::vector<PlaneCandidate> findEligibleCandidates(
           PlaneCandidate{acceptedPlanes[stablePlaneIndex].regionId,
                          acceptedPlanes[stablePlaneIndex].directionalPlaneId,
                          1u, offset.squaredDistance, squaredDistance,
-                         supportPosition, 0.0f});
+                         supportPosition, 0.0f,
+                         acceptedPlanes[stablePlaneIndex].radialVariance});
       continue;
     }
     ++found->second.consistentSupportCount;
@@ -545,7 +638,9 @@ void writeInferredCell(const grid_map::GridMap& supportMap,
                        grid_map::GridMap& outputMap,
                        const grid_map::Index& supportIndex,
                        const float predictedHeight,
-                       const PiecewisePlanarParameters& parameters) {
+                       const PiecewisePlanarParameters& parameters,
+                       grid_map::Matrix* confidence,
+                       const PiecewisePlanarConfidence confidenceValue) {
   grid_map::Position position;
   if (!supportMap.getPosition(supportIndex, position)) {
     return;
@@ -559,13 +654,15 @@ void writeInferredCell(const grid_map::GridMap& supportMap,
       predictedHeight - parameters.inferredHalfRange;
   outputMap.at("upper_bound", outputIndex) =
       predictedHeight + parameters.inferredHalfRange;
+  markConfidence(confidence, outputIndex, confidenceValue);
 }
 
 void completeThinOcclusionBands(
     const grid_map::GridMap& supportMap, grid_map::GridMap& outputMap,
     const std::vector<AcceptedPlane>& acceptedPlanes,
     const PiecewisePlanarParameters& parameters,
-    std::set<IndexKey>& inferredSupportIndices) {
+    std::set<IndexKey>& inferredSupportIndices,
+    grid_map::Matrix* confidence) {
   const Eigen::MatrixXi supportPlaneIds =
       buildSupportPlaneIds(supportMap, acceptedPlanes, parameters);
   const auto offsets =
@@ -597,7 +694,7 @@ void completeThinOcclusionBands(
     }
     const auto& selected = candidates[selectedIndex];
     writeInferredCell(supportMap, outputMap, index, selected.predictedHeight,
-                      parameters);
+                      parameters, confidence, PiecewisePlanarConfidence::Weak);
     inferredSupportIndices.insert(makeKey(index));
   }
 }
@@ -606,7 +703,8 @@ void completeDirectionalGroundGaps(
     const grid_map::GridMap& supportMap, grid_map::GridMap& outputMap,
     const std::vector<AcceptedPlane>& acceptedPlanes,
     const PiecewisePlanarParameters& parameters,
-    std::set<IndexKey>& inferredSupportIndices) {
+    std::set<IndexKey>& inferredSupportIndices,
+    grid_map::Matrix* confidence) {
   if (!hasValidDirectionalConfiguration(parameters)) {
     return;
   }
@@ -627,15 +725,53 @@ void completeDirectionalGroundGaps(
   for (grid_map::GridMapIterator iterator(supportMap); !iterator.isPastEnd();
        ++iterator) {
     const grid_map::Index index = *iterator;
-    if (supportMap.isValid(index, requiredLayers)) {
-      continue;
-    }
+    const bool hasValidObservation =
+        supportMap.isValid(index, requiredLayers);
+    const int currentPlaneIndex =
+        supportPlaneIds(index(0), index(1));
     grid_map::Position cellPosition;
     if (!supportMap.getPosition(index, cellPosition)) {
       continue;
     }
-    const auto candidates = findEligibleCandidates(
+    auto candidates = findEligibleCandidates(
         supportMap, index, supportPlaneIds, acceptedPlanes, offsets, parameters);
+    if (hasValidObservation && currentPlaneIndex >= 0) {
+      const auto& currentPlane =
+          acceptedPlanes[static_cast<std::size_t>(currentPlaneIndex)];
+      const float currentHeight = static_cast<float>(
+          currentPlane.plane.coefficients(0) * cellPosition.x() +
+          currentPlane.plane.coefficients(1) * cellPosition.y() +
+          currentPlane.plane.coefficients(2));
+      constexpr double kMinimumNeighborDepthRatio = 1.5;
+      const double minimumNeighborVariance =
+          kMinimumNeighborDepthRatio * currentPlane.radialVariance;
+      bool hasDeeperHighPlane = false;
+      bool hasDeeperLowPlane = false;
+      for (const auto& candidate : candidates) {
+        if (candidate.planeId == currentPlane.regionId ||
+            candidate.radialVariance < minimumNeighborVariance) {
+          continue;
+        }
+        hasDeeperHighPlane =
+            hasDeeperHighPlane ||
+            candidate.predictedHeight >
+                currentHeight + parameters.neighborHeightTolerance;
+        hasDeeperLowPlane =
+            hasDeeperLowPlane ||
+            candidate.predictedHeight <
+                currentHeight - parameters.neighborHeightTolerance;
+      }
+      if (!hasDeeperHighPlane || !hasDeeperLowPlane) {
+        continue;
+      }
+      candidates.erase(
+          std::remove_if(
+              candidates.begin(), candidates.end(),
+              [&currentPlane](const PlaneCandidate& candidate) {
+                return candidate.planeId == currentPlane.regionId;
+              }),
+          candidates.end());
+    }
 
     const PlaneCandidate* selectedHigh = nullptr;
     const PlaneCandidate* selectedLow = nullptr;
@@ -693,7 +829,8 @@ void completeDirectionalGroundGaps(
       continue;
     }
     writeInferredCell(supportMap, outputMap, index,
-                      selectedLow->predictedHeight, parameters);
+                      selectedLow->predictedHeight, parameters, confidence,
+                      PiecewisePlanarConfidence::DirectionalCompletion);
     inferredSupportIndices.insert(makeKey(index));
   }
 }
@@ -704,21 +841,32 @@ PiecewisePlanarResult processPiecewisePlanarElevationIfEnabled(
     const grid_map::GridMap& supportMap,
     grid_map::GridMap& outputMap,
     const bool enabled,
-    const PiecewisePlanarParameters& parameters) {
+    const PiecewisePlanarParameters& parameters,
+    grid_map::Matrix* confidence) {
   if (!enabled) {
     return emptyResult();
   }
-  return processPiecewisePlanarElevation(supportMap, outputMap, parameters);
+  return processPiecewisePlanarElevation(
+      supportMap, outputMap, parameters, confidence);
 }
 
 PiecewisePlanarResult processPiecewisePlanarElevation(
     const grid_map::GridMap& supportMap,
     grid_map::GridMap& outputMap,
-    const PiecewisePlanarParameters& parameters) {
+    const PiecewisePlanarParameters& parameters,
+    grid_map::Matrix* confidence) {
   if (!hasRequiredLayers(supportMap) || !hasRequiredLayers(outputMap) ||
       !hasIdenticalGeometry(supportMap, outputMap) ||
       !hasValidParameters(parameters)) {
     return emptyResult();
+  }
+  if (confidence != nullptr) {
+    const grid_map::Size size = outputMap.getSize();
+    if (confidence->rows() != size(0) || confidence->cols() != size(1)) {
+      confidence = nullptr;
+    } else {
+      confidence->setZero();
+    }
   }
 
   const auto supportCells = snapshotSupportCells(supportMap);
@@ -744,14 +892,21 @@ PiecewisePlanarResult processPiecewisePlanarElevation(
       outputMap.at("elevation", outputIndex) = predictedHeight;
       outputMap.at("upper_bound", outputIndex) = cell.upperBound + correction;
       outputMap.at("lower_bound", outputIndex) = cell.lowerBound + correction;
+      markConfidence(
+          confidence, outputIndex,
+          accepted.plane.horizontalMode
+              ? PiecewisePlanarConfidence::HorizontalPlane
+              : (accepted.directionalEligible
+                     ? PiecewisePlanarConfidence::StablePlane
+                     : PiecewisePlanarConfidence::Weak));
       ++result.regularizedCells;
     }
   }
   std::set<IndexKey> inferredSupportIndices;
   completeThinOcclusionBands(supportMap, outputMap, acceptedPlanes, parameters,
-                             inferredSupportIndices);
+                             inferredSupportIndices, confidence);
   completeDirectionalGroundGaps(supportMap, outputMap, acceptedPlanes,
-                                parameters, inferredSupportIndices);
+                                parameters, inferredSupportIndices, confidence);
   result.inferredCells = inferredSupportIndices.size();
   return result;
 }

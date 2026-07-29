@@ -266,6 +266,10 @@ class ElevationMap {
    */
   void resetFusedData();
 
+  void stabilizePiecewisePlanarOutput(
+      grid_map::GridMap& outputMap,
+      const grid_map::Matrix& currentConfidence);
+
   /*!
    * Cumulative distribution function.
    * @param x the argument value.
@@ -311,6 +315,11 @@ class ElevationMap {
 
   //! Mutex lock for visibility cleanup map.
   boost::recursive_mutex visibilityCleanupMapMutex_;
+
+  //! Last reliable planar output, matched in the map frame.
+  grid_map::GridMap planarOutputCache_;
+  bool hasPlanarOutputCache_;
+  boost::recursive_mutex planarOutputCacheMutex_;
 
   //! Underlying map subscriber.
   rclcpp::Subscription<grid_map_msgs::msg::GridMap>::SharedPtr underlyingMapSubscriber_;

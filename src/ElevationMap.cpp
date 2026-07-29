@@ -44,6 +44,9 @@ ElevationMap::ElevationMap(std::shared_ptr<rclcpp::Node> nodeHandle)
       // FIXME: Postprocessor num threads should be same as number of filters
       postprocessorPool_(nodeHandle_->get_parameter("postprocessor_num_threads").as_int(), nodeHandle_),
       hasUnderlyingMap_(false),
+      planarOutputCache_(
+          {"elevation", "upper_bound", "lower_bound", "confidence"}),
+      hasPlanarOutputCache_(false),
       minVariance_(0.000009),
       maxVariance_(0.0009),
       mahalanobisDistanceThreshold_(1.5),
@@ -59,7 +62,8 @@ ElevationMap::ElevationMap(std::shared_ptr<rclcpp::Node> nodeHandle)
       enablePiecewisePlanarRegularization_(
           defaultPiecewisePlanarRegularizationEnabled()),
       piecewisePlanarParameters_{
-          0.06f, 12u, 0.03f, 0.05f, 0.12f, 4u, 0.05f, false, 0.40f} {
+          0.06f, 12u, 0.03f, 0.05f, 0.12f, 4u, 0.05f, false, 0.40f,
+          0.01f} {
   nodeHandle_->declare_parameter(
       "enable_small_hole_filling", defaultSmallHoleFillingEnabled());
   nodeHandle_->declare_parameter("small_hole_max_size", 4);
@@ -85,6 +89,7 @@ ElevationMap::ElevationMap(std::shared_ptr<rclcpp::Node> nodeHandle)
   nodeHandle_->declare_parameter("planar_inferred_half_range", 0.05);
   nodeHandle_->declare_parameter("enable_directional_ground_completion", false);
   nodeHandle_->declare_parameter("directional_ground_max_gap_width", 0.40);
+  nodeHandle_->declare_parameter("planar_horizontal_snap_max_slope", 0.01);
   nodeHandle_->get_parameter(
       "enable_piecewise_planar_regularization",
       enablePiecewisePlanarRegularization_);
@@ -113,6 +118,9 @@ ElevationMap::ElevationMap(std::shared_ptr<rclcpp::Node> nodeHandle)
   nodeHandle_->get_parameter(
       "directional_ground_max_gap_width",
       piecewisePlanarParameters_.directionalGroundMaxGapWidth);
+  nodeHandle_->get_parameter(
+      "planar_horizontal_snap_max_slope",
+      piecewisePlanarParameters_.horizontalSnapMaxSlope);
   piecewisePlanarParameters_.minRegionSize =
       static_cast<std::size_t>(minRegionSize < 0 ? 0 : minRegionSize);
   piecewisePlanarParameters_.minOcclusionSupport =
@@ -640,15 +648,107 @@ bool ElevationMap::publishFusedElevationMap() {
   scopedLock.unlock();
   fillSmallElevationHolesIfEnabled(
       fusedMapCopy, enableSmallHoleFilling_, smallHoleFillingParameters_);
+  grid_map::Matrix planarConfidence =
+      grid_map::Matrix::Zero(fusedMapCopy.getSize()(0),
+                             fusedMapCopy.getSize()(1));
   processPiecewisePlanarElevationIfEnabled(
       planarSupportMap, fusedMapCopy, enablePiecewisePlanarRegularization_,
-      piecewisePlanarParameters_);
+      piecewisePlanarParameters_, &planarConfidence);
+  if (enablePiecewisePlanarRegularization_) {
+    stabilizePiecewisePlanarOutput(fusedMapCopy, planarConfidence);
+  }
   fusedMapCopy.add("uncertainty_range", fusedMapCopy.get("upper_bound") - fusedMapCopy.get("lower_bound"));
   std::unique_ptr<grid_map_msgs::msg::GridMap> message;
   message = grid_map::GridMapRosConverter::toMessage(fusedMapCopy);
   elevationMapFusedPublisher_->publish(std::move(message));
   RCLCPP_DEBUG(nodeHandle_->get_logger(), "Elevation map (fused) has been published.");
   return true;
+}
+
+void ElevationMap::stabilizePiecewisePlanarOutput(
+    grid_map::GridMap& outputMap,
+    const grid_map::Matrix& currentConfidence) {
+  if (currentConfidence.rows() != outputMap.getSize()(0) ||
+      currentConfidence.cols() != outputMap.getSize()(1)) {
+    return;
+  }
+
+  boost::recursive_mutex::scoped_lock scopedLock(planarOutputCacheMutex_);
+  grid_map::GridMap nextCache(
+      {"elevation", "upper_bound", "lower_bound", "confidence"});
+  nextCache.setGeometry(outputMap.getLength(), outputMap.getResolution(),
+                        outputMap.getPosition());
+  nextCache.setFrameId(outputMap.getFrameId());
+  nextCache.setTimestamp(outputMap.getTimestamp());
+  nextCache.get("confidence").setZero();
+
+  const std::vector<std::string> heightLayers{
+      "elevation", "upper_bound", "lower_bound"};
+  constexpr float kWeakConfidence =
+      static_cast<float>(PiecewisePlanarConfidence::Weak);
+  constexpr float kStableConfidence =
+      static_cast<float>(PiecewisePlanarConfidence::StablePlane);
+  constexpr float kHorizontalConfidence =
+      static_cast<float>(PiecewisePlanarConfidence::HorizontalPlane);
+  constexpr float kDirectionalConfidence =
+      static_cast<float>(PiecewisePlanarConfidence::DirectionalCompletion);
+
+  for (grid_map::GridMapIterator iterator(outputMap); !iterator.isPastEnd();
+       ++iterator) {
+    const grid_map::Index outputIndex = *iterator;
+    const float current = currentConfidence(outputIndex(0), outputIndex(1));
+
+    grid_map::Position position;
+    if (!outputMap.getPosition(outputIndex, position)) {
+      continue;
+    }
+    grid_map::Index nextCacheIndex;
+    if (!nextCache.getIndex(position, nextCacheIndex)) {
+      continue;
+    }
+
+    grid_map::Index previousIndex;
+    const bool hasPrevious =
+        hasPlanarOutputCache_ &&
+        planarOutputCache_.getFrameId() == outputMap.getFrameId() &&
+        planarOutputCache_.getIndex(position, previousIndex) &&
+        planarOutputCache_.isValid(previousIndex, heightLayers) &&
+        planarOutputCache_.at("confidence", previousIndex) > 0.0f;
+    const float previous =
+        hasPrevious
+            ? planarOutputCache_.at("confidence", previousIndex)
+            : 0.0f;
+    const bool isStrongCurrent =
+        current == kHorizontalConfidence ||
+        current == kDirectionalConfidence;
+    const bool stableCanReplacePrevious =
+        current == kStableConfidence &&
+        previous != kHorizontalConfidence;
+    const bool useCurrent =
+        current > 0.0f && outputMap.isValid(outputIndex, heightLayers) &&
+        (!hasPrevious || isStrongCurrent || stableCanReplacePrevious ||
+         previous <= kWeakConfidence);
+
+    if (useCurrent) {
+      for (const auto& layer : heightLayers) {
+        nextCache.at(layer, nextCacheIndex) = outputMap.at(layer, outputIndex);
+      }
+      nextCache.at("confidence", nextCacheIndex) = current;
+      continue;
+    }
+    if (!hasPrevious) {
+      continue;
+    }
+    for (const auto& layer : heightLayers) {
+      const float value = planarOutputCache_.at(layer, previousIndex);
+      outputMap.at(layer, outputIndex) = value;
+      nextCache.at(layer, nextCacheIndex) = value;
+    }
+    nextCache.at("confidence", nextCacheIndex) = previous;
+  }
+
+  planarOutputCache_ = std::move(nextCache);
+  hasPlanarOutputCache_ = true;
 }
 
 bool ElevationMap::publishVisibilityCleanupMap() {
@@ -720,14 +820,23 @@ bool ElevationMap::clear() {
     fusedMap_.clearAll();
     fusedMap_.resetTimestamp();
   }
+  {
+    boost::recursive_mutex::scoped_lock scopedLock(planarOutputCacheMutex_);
+    planarOutputCache_.clearAll();
+    hasPlanarOutputCache_ = false;
+  }
   return true;
 } 
 
 void ElevationMap::setGeometry(const grid_map::Length& length, const double& resolution, const grid_map::Position& position) {
   boost::recursive_mutex::scoped_lock scopedLockForRawData(rawMapMutex_);
   boost::recursive_mutex::scoped_lock scopedLockForFusedData(fusedMapMutex_);
+  boost::recursive_mutex::scoped_lock scopedLockForPlanarCache(
+      planarOutputCacheMutex_);
   rawMap_.setGeometry(length, resolution, position);
   fusedMap_.setGeometry(length, resolution, position);
+  planarOutputCache_.setGeometry(length, resolution, position);
+  hasPlanarOutputCache_ = false;
   RCLCPP_INFO_STREAM(nodeHandle_->get_logger(), "Elevation map grid resized to " << rawMap_.getSize()(0) << " rows and " << rawMap_.getSize()(1) << " columns.");
 }
 
