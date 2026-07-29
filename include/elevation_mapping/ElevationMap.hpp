@@ -25,7 +25,6 @@
 #include <rclcpp/rclcpp.hpp>
 
 // Elevation Mapping
-#include "elevation_mapping/MultimodalElevation.hpp"
 #include "elevation_mapping/PointXYZRGBConfidenceRatio.hpp"
 #include "elevation_mapping/PiecewisePlanarProcessor.hpp"
 #include "elevation_mapping/postprocessing/PostprocessorPool.hpp"
@@ -245,8 +244,6 @@ class ElevationMap {
                           double margin);
 
   friend class ElevationMapping;
-  friend class ElevationMapMixedReturnTest;
-  friend class ElevationMapMultimodalTest;
 
  private:
   /*!
@@ -262,12 +259,6 @@ class ElevationMap {
    * @return true if successful.
    */
   bool clean();
-
-  /*!
-   * Fills small holes in a map copy before publication.
-   * @param map the fused map copy to modify.
-   */
-  void fillHolesForPublication(grid_map::GridMap& map) const;
 
   /*!
    * Resets the fused map data.
@@ -289,9 +280,6 @@ class ElevationMap {
 
   //! Raw elevation map as grid map.
   grid_map::GridMap rawMap_;
-
-  //! Persistent multimodal cell state, kept private from map publication.
-  grid_map::GridMap multimodalStateMap_;
 
   //! Fused elevation map as grid map.
   grid_map::GridMap fusedMap_;
@@ -329,7 +317,6 @@ class ElevationMap {
 
   //! Initial ros time
   rclcpp::Time initialTime_;
-  bool isInitialTimeSet_;
 
   //! Parameters. Are set through the ElevationMapping class.
   double minVariance_;
@@ -338,24 +325,6 @@ class ElevationMap {
   double multiHeightNoise_;
   double minHorizontalVariance_;
   double maxHorizontalVariance_;
-  bool edgeAwareFusion_;
-  bool enableMultimodalCells_;
-  MultimodalConfig multimodalConfig_;
-  bool enableSkipLowerPoints_;
-  double skipLowerPointsDuration_;
-  int lowerPointRecoveryCount_;
-  bool enableAdaptiveLowerSurface_;
-  double lowerSurfaceNeighborRadius_;
-  int lowerSurfaceMinSupport_;
-  int lowerSurfaceMinCandidateSupport_;
-  int lowerSurfaceRecoveryCount_;
-  double lowerSurfaceHeightThreshold_;
-  double lowerSurfaceMaxTimeGap_;
-  bool enableFusedMapHoleFilling_;
-  double fusedMapHoleFillingRadius_;
-  int fusedMapHoleFillingMinSupport_;
-  double fusedMapHoleFillingHeightThreshold_;
-  double fusionHeightDifferenceThreshold_;
   std::string underlyingMapTopic_;
   bool enableVisibilityCleanup_;
   bool enableContinuousCleanup_;

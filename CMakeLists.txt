@@ -4,7 +4,6 @@ project(elevation_mapping)
 if(NOT CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD 14)
 endif()
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
@@ -98,10 +97,8 @@ ament_target_dependencies(${PROJECT_NAME}_pcl_types
 )
 
 add_library(${PROJECT_NAME}_library
-  src/EdgeAwareMapUtils.cpp
   src/ElevationMapping.cpp
   src/ElevationMap.cpp
-  src/MultimodalElevation.cpp
   src/ScanCellSelector.cpp
   src/SmallHoleFiller.cpp
   src/PiecewisePlanarProcessor.cpp
@@ -180,12 +177,6 @@ install(TARGETS
   DESTINATION lib/${PROJECT_NAME}
 )
 
-install(PROGRAMS
-  scripts/analyze_elevation_bag.py
-  scripts/run_elevation_bag_regression.sh
-  DESTINATION lib/${PROJECT_NAME}
-)
-
 # install(
 #   DIRECTORY 
 #     include/${PROJECT_NAME}/
@@ -259,22 +250,6 @@ if(BUILD_TESTING)
     ${Eigen_INCLUDE_DIRS}
   )
 
-  ament_add_gtest(test_${PROJECT_NAME}_edge_aware_map
-    test/EdgeAwareMapUtilsTest.cpp
-    test/ElevationMapAdaptiveTest.cpp
-    test/ElevationMapMultimodalTest.cpp
-    test/MultimodalElevationTest.cpp
-  )
-
-  target_link_libraries(test_${PROJECT_NAME}_edge_aware_map
-    ${PROJECT_NAME}_library
-  )
-
-  target_include_directories(test_${PROJECT_NAME}_edge_aware_map
-    PRIVATE
-      include
-  )
-
   ament_add_gtest(test_scan_cell_selector
     test/ScanCellSelectorTest.cpp
   )
@@ -284,19 +259,6 @@ if(BUILD_TESTING)
   )
 
   target_include_directories(test_scan_cell_selector
-    PRIVATE
-      include
-  )
-
-  ament_add_gtest(test_${PROJECT_NAME}_lifecycle
-    test/ElevationMappingLifecycleTest.cpp
-  )
-
-  target_link_libraries(test_${PROJECT_NAME}_lifecycle
-    ${PROJECT_NAME}_library
-  )
-
-  target_include_directories(test_${PROJECT_NAME}_lifecycle
     PRIVATE
       include
   )

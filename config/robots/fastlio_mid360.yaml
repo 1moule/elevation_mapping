@@ -11,7 +11,7 @@ elevation_mapping:
         min_radius: 0.02
         beam_angle: 0.0006
         beam_constant: 0.001
-        ignore_points_above: 1.5
+        ignore_points_above: 0.0
         ignore_points_below: -3.0
         apply_voxelgrid_filter: true
         voxelgrid_filter_size: 0.01
@@ -27,57 +27,24 @@ elevation_mapping:
 
     min_update_rate: 2.0
     time_tolerance: 0.5
-    time_offset_for_point_cloud: 0.0
-
     length_in_x: 3.0
     length_in_y: 3.0
     position_x: 0.0
     position_y: 0.0
     resolution: 0.04
-    min_variance: 0.0001
-    max_variance: 0.05
-    min_horizontal_variance: 0.0002
-    max_horizontal_variance: 0.005
-    edge_aware_fusion: true
-    fusion_height_difference_threshold: 0.05
-    enable_multimodal_cells: true
-    multimodal_height_separation: 0.05
-    multimodal_min_points: 3
-    multimodal_min_xy_bins: 2
-    multimodal_switch_margin_bins: 1
-    multimodal_switch_confirmations: 3
-    multimodal_stale_timeout: 0.5
-    mahalanobis_distance_threshold: 2.0
-    multi_height_noise: 0.00001
+
+    min_variance: 0.000009
+    max_variance: 0.01
+    min_horizontal_variance: 0.0001
+    max_horizontal_variance: 0.05
+    mahalanobis_distance_threshold: 2.5
+    multi_height_noise: 0.000009
+
     fused_map_publishing_rate: 20.0
-    enable_skip_lower_points: true
-    skip_lower_points_duration: 0.8
-    lower_point_recovery_count: 8
-    enable_adaptive_lower_surface: true
-    lower_surface_neighbor_radius: 0.12
-    lower_surface_min_support: 4
-    lower_surface_min_candidate_support: 2
-    lower_surface_recovery_count: 2
-    lower_surface_height_threshold: 0.05
-    lower_surface_max_time_gap: 0.25
-    enable_fused_map_hole_filling: true
-    fused_map_hole_filling_radius: 0.12
-    fused_map_hole_filling_min_support: 4
-    fused_map_hole_filling_height_threshold: 0.05
-    scanning_duration: 0.3
-    remove_penetrated_points_rate: 5.0
+    enable_visibility_cleanup: true
     visibility_cleanup_rate: 2.0
-    enable_visibility_cleanup: false
     enable_continuous_cleanup: false
-
-    robot_motion_map_update:
-      covariance_scale_translation_x: 0.0
-      covariance_scale_translation_y: 0.0
-      covariance_scale_translation_z: 0.0
-      covariance_scale_rotation_x: 0.0
-      covariance_scale_rotation_y: 0.0
-      covariance_scale_rotation_z: 0.0
-
+    scanning_duration: 1.0
     enable_small_hole_filling: true
     small_hole_max_size: 4
     small_hole_min_support: 4

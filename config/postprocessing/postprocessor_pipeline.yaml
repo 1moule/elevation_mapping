@@ -2,14 +2,14 @@ elevation_mapping:
   ros__parameters:
   
     postprocessor_pipeline: # set by postprocessor_pipeline_name
-      # Fill only small holes. Fused map edge preservation is handled in C++.
+      # Fill holes in the map with inpainting.
       filter1:
         name: inpaint
         type: gridMapCv/InpaintFilter
         params:
           input_layer: elevation
           output_layer: elevation_inpainted
-          radius: 0.06
+          radius: 0.05
 
       # Compute Surface normals
       filter2:

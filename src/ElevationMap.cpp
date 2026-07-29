@@ -6,11 +6,8 @@
  *	 Institute: ETH Zurich, ANYbotics
  */
 
-#include <algorithm>
-#include <array>
 #include <cmath>
 #include <cstring>
-#include <limits>
 
 #include <grid_map_msgs/msg/grid_map.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -18,8 +15,6 @@
 
 #include "elevation_mapping/ElevationMap.hpp"
 #include "elevation_mapping/ElevationMapFunctors.hpp"
-#include "elevation_mapping/EdgeAwareMapUtils.hpp"
-#include "elevation_mapping/MultimodalElevation.hpp"
 #include "elevation_mapping/PointXYZRGBConfidenceRatio.hpp"
 #include "elevation_mapping/ScanCellSelector.hpp"
 #include "elevation_mapping/SmallHoleFiller.hpp"
@@ -39,340 +34,22 @@ float intAsFloat(const uint32_t input) {
 }  // namespace
 
 namespace elevation_mapping {
-namespace {
-
-struct ModeLayerNames {
-  const char* elevation;
-  const char* variance;
-  const char* color;
-  const char* lowest;
-  const char* confidence;
-  const char* time;
-  const char* coverage;
-  const char* observations;
-  const char* center;
-  const char* sensorX;
-  const char* sensorY;
-  const char* sensorZ;
-};
-
-const std::array<ModeLayerNames, 2> kModeLayers{{
-    {"mode0_elevation", "mode0_variance", "mode0_color", "mode0_lowest",
-     "mode0_confidence", "mode0_time", "mode0_coverage",
-     "mode0_observations", "mode0_center", "mode0_sensor_x",
-     "mode0_sensor_y", "mode0_sensor_z"},
-    {"mode1_elevation", "mode1_variance", "mode1_color", "mode1_lowest",
-     "mode1_confidence", "mode1_time", "mode1_coverage",
-     "mode1_observations", "mode1_center", "mode1_sensor_x",
-     "mode1_sensor_y", "mode1_sensor_z"},
-}};
-
-constexpr const char* kPrimaryModeIndexLayer = "primary_mode_index";
-constexpr const char* kChallengerModeIndexLayer = "challenger_mode_index";
-constexpr const char* kChallengerCountLayer = "challenger_count";
-constexpr std::array<const char*, 4> kMultimodalDiagnosticLayers{{
-    "secondary_elevation", "height_mode_count", "height_mode_separation",
-    "primary_mode_confidence",
-}};
-
-std::size_t cellKey(
-    const grid_map::Index& index, const grid_map::Size& size) {
-  return static_cast<std::size_t>(index(0) * size(1) + index(1));
-}
-
-void resetModeAt(
-    grid_map::GridMap& map, const grid_map::Index& index,
-    const ModeLayerNames& layers) {
-  const float nan = std::numeric_limits<float>::quiet_NaN();
-  map.at(layers.elevation, index) = nan;
-  map.at(layers.variance, index) = nan;
-  map.at(layers.color, index) = nan;
-  map.at(layers.lowest, index) = nan;
-  map.at(layers.confidence, index) = 0.0f;
-  map.at(layers.time, index) = nan;
-  map.at(layers.coverage, index) = 0.0f;
-  map.at(layers.observations, index) = 0.0f;
-  map.at(layers.center, index) = 0.0f;
-  map.at(layers.sensorX, index) = nan;
-  map.at(layers.sensorY, index) = nan;
-  map.at(layers.sensorZ, index) = nan;
-}
-
-void resetMultimodalStateAt(
-    grid_map::GridMap& map, const grid_map::Index& index) {
-  for (const auto& layers : kModeLayers) {
-    resetModeAt(map, index, layers);
-  }
-  map.at(kPrimaryModeIndexLayer, index) = -1.0f;
-  map.at(kChallengerModeIndexLayer, index) = -1.0f;
-  map.at(kChallengerCountLayer, index) = 0.0f;
-}
-
-void resetMultimodalState(grid_map::GridMap& map) {
-  if (map.getSize().prod() == 0) {
-    return;
-  }
-  for (grid_map::GridMapIterator iterator(map); !iterator.isPastEnd();
-       ++iterator) {
-    resetMultimodalStateAt(map, *iterator);
-  }
-}
-
-void resetMultimodalState(
-    grid_map::GridMap& map,
-    const std::vector<grid_map::BufferRegion>& regions) {
-  for (const auto& region : regions) {
-    for (grid_map::SubmapIterator iterator(map, region);
-         !iterator.isPastEnd(); ++iterator) {
-      resetMultimodalStateAt(map, *iterator);
-    }
-  }
-}
-
-void resetRawDiagnostics(grid_map::GridMap& map) {
-  for (const char* layer : kMultimodalDiagnosticLayers) {
-    if (!map.exists(layer)) {
-      map.add(layer);
-    }
-  }
-  map["secondary_elevation"].setConstant(
-      std::numeric_limits<float>::quiet_NaN());
-  map["height_mode_count"].setZero();
-  map["height_mode_separation"].setConstant(
-      std::numeric_limits<float>::quiet_NaN());
-  map["primary_mode_confidence"].setConstant(
-      std::numeric_limits<float>::quiet_NaN());
-}
-
-bool hasValidRawMapGeometry(const grid_map::GridMap& map) {
-  const auto& size = map.getSize();
-  const auto& startIndex = map.getStartIndex();
-  return size(0) > 0 && size(1) > 0 &&
-         std::isfinite(map.getResolution()) && map.getResolution() > 0.0 &&
-         map.getLength().allFinite() && (map.getLength() > 0.0).all() &&
-         map.getPosition().allFinite() &&
-         startIndex(0) >= 0 && startIndex(0) < size(0) &&
-         startIndex(1) >= 0 && startIndex(1) < size(1);
-}
-
-void resetRawDiagnostics(
-    grid_map::GridMap& map,
-    const std::vector<grid_map::BufferRegion>& regions) {
-  const float nan = std::numeric_limits<float>::quiet_NaN();
-  for (const auto& region : regions) {
-    for (grid_map::SubmapIterator iterator(map, region);
-         !iterator.isPastEnd(); ++iterator) {
-      map.at("secondary_elevation", *iterator) = nan;
-      map.at("height_mode_count", *iterator) = 0.0f;
-      map.at("height_mode_separation", *iterator) = nan;
-      map.at("primary_mode_confidence", *iterator) = nan;
-    }
-  }
-}
-
-std::size_t decodeCount(float value) {
-  if (!std::isfinite(value) || value <= 0.0f) {
-    return 0;
-  }
-  return static_cast<std::size_t>(std::lround(value));
-}
-
-int decodeIndex(float value) {
-  if (!std::isfinite(value)) {
-    return -1;
-  }
-  return static_cast<int>(std::lround(value));
-}
-
-SurfaceModeState decodeMode(
-    const grid_map::GridMap& map, const grid_map::Index& index,
-    const ModeLayerNames& layers) {
-  SurfaceModeState mode;
-  mode.height = map.at(layers.elevation, index);
-  mode.valid = std::isfinite(mode.height);
-  if (!mode.valid) {
-    return mode;
-  }
-  mode.variance = map.at(layers.variance, index);
-  mode.color = map.at(layers.color, index);
-  mode.lowestPointHeight = map.at(layers.lowest, index);
-  mode.confidence = map.at(layers.confidence, index);
-  mode.lastSeen = map.at(layers.time, index);
-  mode.coverageBins = decodeCount(map.at(layers.coverage, index));
-  mode.consecutiveObservations =
-      decodeCount(map.at(layers.observations, index));
-  mode.centerOccupied = map.at(layers.center, index) > 0.5f;
-  mode.sensorX = map.at(layers.sensorX, index);
-  mode.sensorY = map.at(layers.sensorY, index);
-  mode.sensorZ = map.at(layers.sensorZ, index);
-  return mode;
-}
-
-MultimodalCellState decodeMultimodalState(
-    const grid_map::GridMap& map, const grid_map::Index& index) {
-  MultimodalCellState state;
-  for (std::size_t modeIndex = 0; modeIndex < state.modes.size();
-       ++modeIndex) {
-    state.modes[modeIndex] =
-        decodeMode(map, index, kModeLayers[modeIndex]);
-  }
-  state.primaryIndex = decodeIndex(map.at(kPrimaryModeIndexLayer, index));
-  state.challengerIndex =
-      decodeIndex(map.at(kChallengerModeIndexLayer, index));
-  state.challengerCount =
-      std::max(0, decodeIndex(map.at(kChallengerCountLayer, index)));
-  return state;
-}
-
-void encodeMode(
-    grid_map::GridMap& map, const grid_map::Index& index,
-    const ModeLayerNames& layers, const SurfaceModeState& mode) {
-  if (!mode.valid) {
-    resetModeAt(map, index, layers);
-    return;
-  }
-  map.at(layers.elevation, index) = mode.height;
-  map.at(layers.variance, index) = mode.variance;
-  map.at(layers.color, index) = mode.color;
-  map.at(layers.lowest, index) = mode.lowestPointHeight;
-  map.at(layers.confidence, index) = mode.confidence;
-  map.at(layers.time, index) = static_cast<float>(mode.lastSeen);
-  map.at(layers.coverage, index) = static_cast<float>(mode.coverageBins);
-  map.at(layers.observations, index) =
-      static_cast<float>(mode.consecutiveObservations);
-  map.at(layers.center, index) = mode.centerOccupied ? 1.0f : 0.0f;
-  map.at(layers.sensorX, index) = mode.sensorX;
-  map.at(layers.sensorY, index) = mode.sensorY;
-  map.at(layers.sensorZ, index) = mode.sensorZ;
-}
-
-void encodeMultimodalState(
-    grid_map::GridMap& map, const grid_map::Index& index,
-    const MultimodalCellState& state) {
-  for (std::size_t modeIndex = 0; modeIndex < state.modes.size();
-       ++modeIndex) {
-    encodeMode(map, index, kModeLayers[modeIndex], state.modes[modeIndex]);
-  }
-  map.at(kPrimaryModeIndexLayer, index) =
-      static_cast<float>(state.primaryIndex);
-  map.at(kChallengerModeIndexLayer, index) =
-      static_cast<float>(state.challengerIndex);
-  map.at(kChallengerCountLayer, index) =
-      static_cast<float>(state.challengerCount);
-}
-
-void refreshMultimodalDiagnostics(
-    grid_map::GridMap& rawMap, const grid_map::Index& index,
-    const MultimodalCellState& state) {
-  const float nan = std::numeric_limits<float>::quiet_NaN();
-  auto& secondaryElevation = rawMap.at("secondary_elevation", index);
-  auto& modeCountLayer = rawMap.at("height_mode_count", index);
-  auto& modeSeparation = rawMap.at("height_mode_separation", index);
-  auto& primaryConfidence = rawMap.at("primary_mode_confidence", index);
-  secondaryElevation = nan;
-  modeSeparation = nan;
-  primaryConfidence = nan;
-
-  const std::size_t modeCount = countValidModes(state);
-  modeCountLayer = static_cast<float>(modeCount);
-  if (modeCount == 0) {
-    return;
-  }
-
-  int primaryIndex = state.primaryIndex;
-  if (primaryIndex < 0 || primaryIndex >= 2 ||
-      !state.modes[primaryIndex].valid) {
-    primaryIndex = state.modes[0].valid ? 0 : 1;
-  }
-  const auto& primary = state.modes[primaryIndex];
-  primaryConfidence = primary.confidence;
-  if (modeCount == 1) {
-    return;
-  }
-
-  const int secondaryIndex = primaryIndex == 0 ? 1 : 0;
-  const auto& secondary = state.modes[secondaryIndex];
-  secondaryElevation = secondary.height;
-  modeSeparation = std::fabs(primary.height - secondary.height);
-}
-
-void applyMultimodalPrimary(
-    grid_map::GridMap& rawMap, const grid_map::Index& index,
-    const SurfaceModeState& primary, float minHorizontalVariance,
-    float dynamicTime) {
-  rawMap.at("elevation", index) = primary.height;
-  rawMap.at("variance", index) = primary.variance;
-  rawMap.at("horizontal_variance_x", index) = minHorizontalVariance;
-  rawMap.at("horizontal_variance_y", index) = minHorizontalVariance;
-  rawMap.at("horizontal_variance_xy", index) = 0.0f;
-  rawMap.at("color", index) = primary.color;
-  rawMap.at("time", index) = static_cast<float>(primary.lastSeen);
-  rawMap.at("dynamic_time", index) = dynamicTime;
-  rawMap.at("lowest_scan_point", index) = primary.lowestPointHeight;
-  rawMap.at("sensor_x_at_lowest_scan", index) = primary.sensorX;
-  rawMap.at("sensor_y_at_lowest_scan", index) = primary.sensorY;
-  rawMap.at("sensor_z_at_lowest_scan", index) = primary.sensorZ;
-  rawMap.at("lower_point_height", index) = NAN;
-  rawMap.at("lower_point_time", index) = NAN;
-  rawMap.at("lower_point_count", index) = 0.0f;
-  rawMap.at("adaptive_lower_point_height", index) = NAN;
-  rawMap.at("adaptive_lower_point_time", index) = NAN;
-  rawMap.at("adaptive_lower_point_count", index) = 0.0f;
-}
-
-}  // namespace
 
 ElevationMap::ElevationMap(std::shared_ptr<rclcpp::Node> nodeHandle)
     : nodeHandle_(nodeHandle),
       rawMap_({"elevation", "variance", "horizontal_variance_x", "horizontal_variance_y", 
       "horizontal_variance_xy", "color", "time","dynamic_time", "lowest_scan_point", 
-      "sensor_x_at_lowest_scan", "sensor_y_at_lowest_scan", "sensor_z_at_lowest_scan",
-      "lower_point_height", "lower_point_time", "lower_point_count",
-      "adaptive_lower_point_height", "adaptive_lower_point_time", "adaptive_lower_point_count",
-      "secondary_elevation", "height_mode_count", "height_mode_separation",
-      "primary_mode_confidence"}),
-      multimodalStateMap_(
-          {"mode0_elevation", "mode0_variance", "mode0_color", "mode0_lowest",
-           "mode0_confidence", "mode0_time", "mode0_coverage",
-           "mode0_observations", "mode0_center", "mode0_sensor_x",
-           "mode0_sensor_y", "mode0_sensor_z", "mode1_elevation",
-           "mode1_variance", "mode1_color", "mode1_lowest",
-           "mode1_confidence", "mode1_time", "mode1_coverage",
-           "mode1_observations", "mode1_center", "mode1_sensor_x",
-           "mode1_sensor_y", "mode1_sensor_z", "primary_mode_index",
-           "challenger_mode_index", "challenger_count"}),
-      fusedMap_({"elevation", "upper_bound", "lower_bound", "color",
-                 "secondary_elevation", "height_mode_count",
-                 "height_mode_separation", "primary_mode_confidence"}),
+      "sensor_x_at_lowest_scan", "sensor_y_at_lowest_scan", "sensor_z_at_lowest_scan"}),
+      fusedMap_({"elevation", "upper_bound", "lower_bound", "color"}),
       // FIXME: Postprocessor num threads should be same as number of filters
       postprocessorPool_(nodeHandle_->get_parameter("postprocessor_num_threads").as_int(), nodeHandle_),
       hasUnderlyingMap_(false),
-      initialTime_(0, 0, nodeHandle->get_clock()->get_clock_type()),
-      isInitialTimeSet_(false),
       minVariance_(0.000009),
       maxVariance_(0.0009),
       mahalanobisDistanceThreshold_(1.5),
       multiHeightNoise_(0.000009),
       minHorizontalVariance_(0.0001),
       maxHorizontalVariance_(0.05),
-      edgeAwareFusion_(true),
-      enableMultimodalCells_(false),
-      multimodalConfig_(),
-      enableSkipLowerPoints_(false),
-      skipLowerPointsDuration_(0.5),
-      lowerPointRecoveryCount_(5),
-      enableAdaptiveLowerSurface_(false),
-      lowerSurfaceNeighborRadius_(0.12),
-      lowerSurfaceMinSupport_(4),
-      lowerSurfaceMinCandidateSupport_(2),
-      lowerSurfaceRecoveryCount_(2),
-      lowerSurfaceHeightThreshold_(0.05),
-      lowerSurfaceMaxTimeGap_(0.25),
-      enableFusedMapHoleFilling_(false),
-      fusedMapHoleFillingRadius_(0.08),
-      fusedMapHoleFillingMinSupport_(4),
-      fusedMapHoleFillingHeightThreshold_(0.05),
-      fusionHeightDifferenceThreshold_(0.08),
       enableVisibilityCleanup_(true),
       enableContinuousCleanup_(false),
       visibilityCleanupDuration_(0.0),
@@ -451,6 +128,7 @@ ElevationMap::ElevationMap(std::shared_ptr<rclcpp::Node> nodeHandle)
   // TODO(max): if (enableVisibilityCleanup_) when parameter cleanup is ready.
   visibilityCleanupMapPublisher_ = nodeHandle_->create_publisher<grid_map_msgs::msg::GridMap>("visibility_cleanup_map", 1);
 
+  initialTime_ = nodeHandle_->get_clock()->now();
 }
 
 ElevationMap::~ElevationMap() = default;
@@ -472,172 +150,10 @@ bool ElevationMap::add(const PointCloudType::Ptr pointCloud, Eigen::VectorXf& po
   boost::recursive_mutex::scoped_lock scopedLockForRawData(rawMapMutex_);
 
   // Update initial time if it is not initialized.
-  if (!isInitialTimeSet_) {
+  if (initialTime_.seconds() == 0) {
     initialTime_ = timestamp;
-    isInitialTimeSet_ = true;
   }
   const float scanTimeSinceInitialization = (timestamp - initialTime_).seconds();
-  const auto rawMapSize = rawMap_.getSize();
-  const std::size_t cellCount = static_cast<std::size_t>(rawMapSize.prod());
-  std::vector<std::vector<MultimodalPoint>> pointsByCell;
-  std::vector<unsigned char> multimodalHandled;
-  std::vector<unsigned char> multimodalExpired;
-  std::vector<unsigned char> multimodalPrimaryUpdates;
-  std::vector<MultimodalUpdateResult> multimodalResults;
-  std::vector<std::size_t> activeChallengerKeys;
-
-  if (enableMultimodalCells_) {
-    pointsByCell.resize(cellCount);
-    multimodalHandled.assign(cellCount, 0);
-    multimodalExpired.assign(cellCount, 0);
-    multimodalPrimaryUpdates.assign(cellCount, 0);
-    multimodalResults.resize(cellCount);
-    activeChallengerKeys.reserve(cellCount);
-
-    for (grid_map::GridMapIterator iterator(multimodalStateMap_);
-         !iterator.isPastEnd(); ++iterator) {
-      auto state = decodeMultimodalState(multimodalStateMap_, *iterator);
-      const std::size_t key = cellKey(*iterator, rawMapSize);
-      if (expireStaleModes(
-              state, scanTimeSinceInitialization, multimodalConfig_)) {
-        multimodalExpired[key] = 1;
-        encodeMultimodalState(multimodalStateMap_, *iterator, state);
-        refreshMultimodalDiagnostics(rawMap_, *iterator, state);
-        if (state.primaryIndex >= 0 && state.primaryIndex < 2 &&
-            state.modes[state.primaryIndex].valid) {
-          multimodalPrimaryUpdates[key] = 1;
-          multimodalResults[key].primary = state.modes[state.primaryIndex];
-          multimodalResults[key].modeCount = countValidModes(state);
-        }
-      }
-      if (state.challengerIndex != -1 || state.challengerCount != 0) {
-        activeChallengerKeys.push_back(key);
-      }
-    }
-
-    for (unsigned int i = 0; i < pointCloud->size(); ++i) {
-      const auto& point = pointCloud->points[i];
-      grid_map::Index index;
-      if (!rawMap_.getIndex(grid_map::Position(point.x, point.y), index)) {
-        continue;
-      }
-
-      float color;
-      grid_map::colorVectorToValue(point.getRGBVector3i(), color);
-      const float variance = std::min(
-          std::max(
-              static_cast<float>(pointCloudVariances(i)),
-              static_cast<float>(minVariance_)),
-          static_cast<float>(maxVariance_));
-      pointsByCell[cellKey(index, rawMapSize)].push_back(
-          {point.x, point.y, point.z, variance, color});
-    }
-
-    for (const std::size_t key : activeChallengerKeys) {
-      if (!pointsByCell[key].empty()) {
-        continue;
-      }
-      const grid_map::Index index(
-          static_cast<int>(key / static_cast<std::size_t>(rawMapSize(1))),
-          static_cast<int>(key % static_cast<std::size_t>(rawMapSize(1))));
-      auto state = decodeMultimodalState(multimodalStateMap_, index);
-      if (state.challengerIndex != -1 || state.challengerCount != 0) {
-        state.challengerIndex = -1;
-        state.challengerCount = 0;
-        encodeMultimodalState(multimodalStateMap_, index, state);
-      }
-    }
-
-    for (std::size_t key = 0; key < pointsByCell.size(); ++key) {
-      if (pointsByCell[key].empty()) {
-        continue;
-      }
-      multimodalPrimaryUpdates[key] = 0;
-
-      const grid_map::Index index(
-          static_cast<int>(key / static_cast<std::size_t>(rawMapSize(1))),
-          static_cast<int>(key % static_cast<std::size_t>(rawMapSize(1))));
-      grid_map::Position cellCenter;
-      rawMap_.getPosition(index, cellCenter);
-      auto observation = buildCellObservation(
-          pointsByCell[key], static_cast<float>(cellCenter.x()),
-          static_cast<float>(cellCenter.y()),
-          static_cast<float>(rawMap_.getResolution()), multimodalConfig_);
-      for (std::size_t modeIndex = 0; modeIndex < observation.modeCount;
-           ++modeIndex) {
-        observation.modes[modeIndex].sensorX =
-            static_cast<float>(transformationSensorToMap.translation().x());
-        observation.modes[modeIndex].sensorY =
-            static_cast<float>(transformationSensorToMap.translation().y());
-        observation.modes[modeIndex].sensorZ =
-            static_cast<float>(transformationSensorToMap.translation().z());
-      }
-      auto state = decodeMultimodalState(multimodalStateMap_, index);
-      if (countValidModes(state) == 0 && multimodalExpired[key] == 0) {
-        const float legacyHeight = rawMap_.at("elevation", index);
-        const float legacyVariance = rawMap_.at("variance", index);
-        const bool separatedSupportedReturn =
-            observation.modeCount == 1 &&
-            std::fabs(legacyHeight - observation.modes[0].height) >
-                multimodalConfig_.modeSeparation;
-        const bool separatedUnsupportedReturn =
-            observation.modeCount == 0 &&
-            std::any_of(
-                pointsByCell[key].begin(), pointsByCell[key].end(),
-                [&](const MultimodalPoint& point) {
-                  return std::isfinite(point.height) &&
-                         std::fabs(legacyHeight - point.height) >
-                             multimodalConfig_.modeSeparation;
-                });
-        if (std::isfinite(legacyHeight) && std::isfinite(legacyVariance) &&
-            legacyVariance > 0.0f &&
-            (separatedSupportedReturn || separatedUnsupportedReturn)) {
-          auto& incumbent = state.modes[0];
-          incumbent.valid = true;
-          incumbent.height = legacyHeight;
-          incumbent.variance = legacyVariance;
-          incumbent.color = rawMap_.at("color", index);
-          if (!std::isfinite(incumbent.color)) {
-            incumbent.color = observation.modeCount == 1
-                                  ? observation.modes[0].color
-                                  : pointsByCell[key].front().color;
-          }
-          incumbent.lowestPointHeight =
-              rawMap_.at("lowest_scan_point", index);
-          if (!std::isfinite(incumbent.lowestPointHeight)) {
-            incumbent.lowestPointHeight =
-                legacyHeight + 3.0f * std::sqrt(legacyVariance);
-          }
-          incumbent.confidence = 1.0f;
-          incumbent.lastSeen = scanTimeSinceInitialization;
-          incumbent.coverageBins = 0;
-          incumbent.consecutiveObservations = 1;
-          incumbent.centerOccupied = false;
-          incumbent.sensorX =
-              rawMap_.at("sensor_x_at_lowest_scan", index);
-          incumbent.sensorY =
-              rawMap_.at("sensor_y_at_lowest_scan", index);
-          incumbent.sensorZ =
-              rawMap_.at("sensor_z_at_lowest_scan", index);
-          state.primaryIndex = 0;
-        }
-      }
-      auto result = updateMultimodalCell(
-          state, observation, scanTimeSinceInitialization, multimodalConfig_);
-      encodeMultimodalState(multimodalStateMap_, index, state);
-      refreshMultimodalDiagnostics(rawMap_, index, state);
-      if (result.handled) {
-        multimodalHandled[key] = 1;
-        multimodalPrimaryUpdates[key] = 1;
-        multimodalResults[key] = result;
-      }
-    }
-  }
-
-  const auto isMultimodalHandled = [&](const grid_map::Index& index) {
-    return enableMultimodalCells_ &&
-           multimodalHandled[cellKey(index, rawMapSize)] != 0;
-  };
 
   // Store references for efficient interaction.
   // RCLCPP_INFO(nodeHandle_->get_logger(), "ElevationMap::add: Storing references.");
@@ -653,123 +169,6 @@ bool ElevationMap::add(const PointCloudType::Ptr pointCloud, Eigen::VectorXf& po
   auto& sensorXatLowestScanLayer = rawMap_["sensor_x_at_lowest_scan"];
   auto& sensorYatLowestScanLayer = rawMap_["sensor_y_at_lowest_scan"];
   auto& sensorZatLowestScanLayer = rawMap_["sensor_z_at_lowest_scan"];
-  auto& lowerPointHeightLayer = rawMap_["lower_point_height"];
-  auto& lowerPointTimeLayer = rawMap_["lower_point_time"];
-  auto& lowerPointCountLayer = rawMap_["lower_point_count"];
-  auto& adaptiveLowerPointHeightLayer = rawMap_["adaptive_lower_point_height"];
-  auto& adaptiveLowerPointTimeLayer = rawMap_["adaptive_lower_point_time"];
-  auto& adaptiveLowerPointCountLayer = rawMap_["adaptive_lower_point_count"];
-
-  grid_map::GridMap currentScanMap(
-      {"elevation", "variance", "color", "lower_candidate",
-       "adaptive_lower_support", "adaptive_lower_confirmed"});
-  if (enableAdaptiveLowerSurface_) {
-    currentScanMap.setGeometry(rawMap_.getLength(), rawMap_.getResolution(), rawMap_.getPosition());
-    currentScanMap["elevation"].setConstant(std::numeric_limits<float>::quiet_NaN());
-    currentScanMap["variance"].setConstant(std::numeric_limits<float>::quiet_NaN());
-    currentScanMap["color"].setConstant(std::numeric_limits<float>::quiet_NaN());
-    currentScanMap["lower_candidate"].setZero();
-    currentScanMap["adaptive_lower_support"].setConstant(std::numeric_limits<float>::quiet_NaN());
-    currentScanMap["adaptive_lower_confirmed"].setZero();
-    for (unsigned int i = 0; i < pointCloud->size(); ++i) {
-      const auto& point = pointCloud->points[i];
-      grid_map::Index scanIndex;
-      if (!currentScanMap.getIndex(grid_map::Position(point.x, point.y), scanIndex)) {
-        continue;
-      }
-      grid_map::Index rawIndex;
-      if (!rawMap_.getIndex(grid_map::Position(point.x, point.y), rawIndex) ||
-          isMultimodalHandled(rawIndex)) {
-        continue;
-      }
-      auto& scanHeight = currentScanMap.at("elevation", scanIndex);
-      if (!std::isfinite(scanHeight) || point.z < scanHeight) {
-        scanHeight = point.z;
-        currentScanMap.at("variance", scanIndex) =
-            std::max(static_cast<float>(minVariance_),
-                     static_cast<float>(pointCloudVariances(i)));
-        grid_map::colorVectorToValue(
-            point.getRGBVector3i(), currentScanMap.at("color", scanIndex));
-      }
-    }
-
-    for (grid_map::GridMapIterator iterator(currentScanMap); !iterator.isPastEnd(); ++iterator) {
-      const float scanHeight = currentScanMap.at("elevation", *iterator);
-      if (!std::isfinite(scanHeight)) {
-        continue;
-      }
-      grid_map::Position scanPosition;
-      currentScanMap.getPosition(*iterator, scanPosition);
-      grid_map::Index rawIndex;
-      if (!rawMap_.getIndex(scanPosition, rawIndex)) {
-        continue;
-      }
-      if (isMultimodalHandled(rawIndex)) {
-        continue;
-      }
-      const float rawHeight = rawMap_.at("elevation", rawIndex);
-      if (std::isfinite(rawHeight) &&
-          rawHeight - scanHeight > lowerSurfaceHeightThreshold_) {
-          currentScanMap.at("lower_candidate", *iterator) = 1.0f;
-      }
-    }
-
-    for (grid_map::GridMapIterator iterator(currentScanMap); !iterator.isPastEnd(); ++iterator) {
-      const float scanHeight = currentScanMap.at("elevation", *iterator);
-      if (!std::isfinite(scanHeight)) {
-        continue;
-      }
-
-      grid_map::Position scanPosition;
-      currentScanMap.getPosition(*iterator, scanPosition);
-      grid_map::Index rawIndex;
-      if (!rawMap_.getIndex(scanPosition, rawIndex)) {
-        continue;
-      }
-      if (isMultimodalHandled(rawIndex)) {
-        continue;
-      }
-
-      const float rawHeight = rawMap_.at("elevation", rawIndex);
-      const float rawVariance = rawMap_.at("variance", rawIndex);
-      const bool isCandidate =
-          currentScanMap.at("lower_candidate", *iterator) > 0.5f &&
-          std::isfinite(rawHeight) && std::isfinite(rawVariance) &&
-          std::fabs(scanHeight - rawHeight) / std::sqrt(rawVariance) >
-              mahalanobisDistanceThreshold_;
-
-      bool hasSurfaceSupport = false;
-      if (isCandidate) {
-        hasSurfaceSupport = hasConsistentLowerSurfaceSupport(
-            currentScanMap, "elevation", "lower_candidate", *iterator, scanHeight,
-            lowerSurfaceNeighborRadius_, lowerSurfaceHeightThreshold_,
-            static_cast<std::size_t>(lowerSurfaceMinSupport_),
-            static_cast<std::size_t>(lowerSurfaceMinCandidateSupport_));
-        currentScanMap.at("adaptive_lower_support", *iterator) =
-            hasSurfaceSupport ? 1.0f : 0.0f;
-      }
-
-      AdaptiveLowerSurfaceState adaptiveState;
-      adaptiveState.height = adaptiveLowerPointHeightLayer(rawIndex(0), rawIndex(1));
-      adaptiveState.timestamp = adaptiveLowerPointTimeLayer(rawIndex(0), rawIndex(1));
-      const float storedCount = adaptiveLowerPointCountLayer(rawIndex(0), rawIndex(1));
-      adaptiveState.count =
-          std::isfinite(storedCount)
-              ? std::max(0, static_cast<int>(std::lround(storedCount)))
-              : 0;
-      const bool confirmed = updateAdaptiveLowerSurfaceState(
-          adaptiveState, scanHeight, scanTimeSinceInitialization,
-          isCandidate && hasSurfaceSupport, lowerSurfaceHeightThreshold_,
-          lowerSurfaceMaxTimeGap_, lowerSurfaceRecoveryCount_);
-      adaptiveLowerPointHeightLayer(rawIndex(0), rawIndex(1)) = adaptiveState.height;
-      adaptiveLowerPointTimeLayer(rawIndex(0), rawIndex(1)) = adaptiveState.timestamp;
-      adaptiveLowerPointCountLayer(rawIndex(0), rawIndex(1)) =
-          static_cast<float>(adaptiveState.count);
-      if (confirmed) {
-        currentScanMap.at("adaptive_lower_confirmed", *iterator) = 1.0f;
-      }
-    }
-  }
 
   std::vector<Eigen::Ref<const grid_map::Matrix>> basicLayers_;
   for (const std::string& layer : rawMap_.getBasicLayers()) {
@@ -786,16 +185,6 @@ bool ElevationMap::add(const PointCloudType::Ptr pointCloud, Eigen::VectorXf& po
     if (!rawMap_.getIndex(position, index)) {
       continue;  // Skip this point if it does not lie within the elevation map.
     }
-    if (isMultimodalHandled(index)) {
-      continue;
-    }
-    if (enableAdaptiveLowerSurface_) {
-      grid_map::Index scanIndex;
-      if (currentScanMap.getIndex(position, scanIndex) &&
-          currentScanMap.at("adaptive_lower_confirmed", scanIndex) > 0.5f) {
-        continue;
-      }
-    }
 
     auto& elevation = elevationLayer(index(0), index(1));
     auto& variance = varianceLayer(index(0), index(1));
@@ -809,12 +198,6 @@ bool ElevationMap::add(const PointCloudType::Ptr pointCloud, Eigen::VectorXf& po
     auto& sensorXatLowestScan = sensorXatLowestScanLayer(index(0), index(1));
     auto& sensorYatLowestScan = sensorYatLowestScanLayer(index(0), index(1));
     auto& sensorZatLowestScan = sensorZatLowestScanLayer(index(0), index(1));
-    auto& lowerPointHeight = lowerPointHeightLayer(index(0), index(1));
-    auto& lowerPointTime = lowerPointTimeLayer(index(0), index(1));
-    auto& lowerPointCount = lowerPointCountLayer(index(0), index(1));
-    auto& adaptiveLowerPointHeight = adaptiveLowerPointHeightLayer(index(0), index(1));
-    auto& adaptiveLowerPointTime = adaptiveLowerPointTimeLayer(index(0), index(1));
-    auto& adaptiveLowerPointCount = adaptiveLowerPointCountLayer(index(0), index(1));
 
     const float pointVariance =
         sanitizePointVariance(pointCloudVariances(i), minVariance_);
@@ -831,91 +214,25 @@ bool ElevationMap::add(const PointCloudType::Ptr pointCloud, Eigen::VectorXf& po
       horizontalVarianceY = minHorizontalVariance_;
       horizontalVarianceXY = 0.0;
       grid_map::colorVectorToValue(point.getRGBVector3i(), color);
-      time = scanTimeSinceInitialization;
-      dynamicTime = currentTimeSecondsPattern;
-      lowestScanPoint = point.z + 3.0 * sqrt(pointVariance);
-      const grid_map::Position3 sensorTranslation(transformationSensorToMap.translation());
-      sensorXatLowestScan = sensorTranslation.x();
-      sensorYatLowestScan = sensorTranslation.y();
-      sensorZatLowestScan = sensorTranslation.z();
-      lowerPointHeight = NAN;
-      lowerPointTime = NAN;
-      lowerPointCount = 0.0f;
-      adaptiveLowerPointHeight = NAN;
-      adaptiveLowerPointTime = NAN;
-      adaptiveLowerPointCount = 0.0f;
       continue;
     }
 
     // RCLCPP_INFO(nodeHandle_->get_logger(), "Elevation: %f, Point Z: %f, Variance: %f", elevation, point.z, variance);
     // Deal with multiple heights in one cell.
     const double mahalanobisDistance = fabs(point.z - elevation) / sqrt(variance);  // NOLINT(cppcoreguidelines-pro-type-union-access)
-    const double cellAge = scanTimeSinceInitialization - time;
-    const bool isLowerPoint = elevation > point.z;  // NOLINT(cppcoreguidelines-pro-type-union-access)
-
-    const auto recordLowerPoint = [&]() {
-      const bool newLowerScan =
-          std::isnan(lowerPointTime) || fabs(scanTimeSinceInitialization - lowerPointTime) > 0.0001;
-      const bool sameLowerHeight =
-          !std::isnan(lowerPointHeight) &&
-          fabs(point.z - lowerPointHeight) <= fusionHeightDifferenceThreshold_;
-      if (!sameLowerHeight) {
-        lowerPointHeight = point.z;
-        lowerPointCount = 1.0f;
-      } else if (newLowerScan) {
-        lowerPointHeight = 0.5f * (lowerPointHeight + point.z);
-        lowerPointCount += 1.0f;
-      }
-      lowerPointTime = scanTimeSinceInitialization;
-    };
-
-    const auto acceptLowerPoint = [&](float acceptedHeight) {
-      elevation = acceptedHeight;
-      variance = pointVariance;
-      time = scanTimeSinceInitialization;
-      dynamicTime = currentTimeSecondsPattern;
-      horizontalVarianceX = minHorizontalVariance_;
-      horizontalVarianceY = minHorizontalVariance_;
-      horizontalVarianceXY = 0.0;
-      lowerPointHeight = NAN;
-      lowerPointTime = NAN;
-      lowerPointCount = 0.0f;
-      grid_map::colorVectorToValue(point.getRGBVector3i(), color);
-    };
-
     // RCLCPP_INFO(nodeHandle_->get_logger(), "Mahalanobis Distance: %f", mahalanobisDistance);
     if (mahalanobisDistance > mahalanobisDistanceThreshold_) {
       // RCLCPP_INFO(nodeHandle_->get_logger(), "Mahalanobis distance exceeds threshold.");
-      if ((scanTimeSinceInitialization - time <= scanningDuration_ ||
-           (enableSkipLowerPoints_ && cellAge <= skipLowerPointsDuration_)) &&
-          isLowerPoint) {
+      if (scanTimeSinceInitialization - time <= scanningDuration_ &&
+          elevation > point.z) {  // NOLINT(cppcoreguidelines-pro-type-union-access)
           // RCLCPP_INFO(nodeHandle_->get_logger(), "Ignoring point, lower than existing elevation and within scanning duration.");
         // Ignore point if measurement is from the same point cloud (time comparison) and
         // if measurement is lower then the elevation in the map.
-        const float pointHeightPlusUncertainty = point.z + 3.0 * sqrt(pointVariance);  // 3 sigma.
-        if (std::isnan(lowestScanPoint) || pointHeightPlusUncertainty < lowestScanPoint) {
-          lowestScanPoint = pointHeightPlusUncertainty;
-          const grid_map::Position3 sensorTranslation(transformationSensorToMap.translation());
-          sensorXatLowestScan = sensorTranslation.x();
-          sensorYatLowestScan = sensorTranslation.y();
-          sensorZatLowestScan = sensorTranslation.z();
-        }
-        if (enableSkipLowerPoints_) {
-          recordLowerPoint();
-        }
-      } else if (enableSkipLowerPoints_ && isLowerPoint) {
-        recordLowerPoint();
-        if (lowerPointCount >= std::max(1, lowerPointRecoveryCount_)) {
-          acceptLowerPoint(lowerPointHeight);
-        }
       } else if (scanTimeSinceInitialization - time <= scanningDuration_) {
         // RCLCPP_INFO(nodeHandle_->get_logger(), "Point is higher, updating elevation and variance.");
         // If point is higher.
         elevation = point.z;  // NOLINT(cppcoreguidelines-pro-type-union-access)
         variance = pointVariance;
-        lowerPointHeight = NAN;
-        lowerPointTime = NAN;
-        lowerPointCount = 0.0f;
         
       } else {
         // RCLCPP_INFO(nodeHandle_->get_logger(), "Increasing variance due to multi-height noise.");
@@ -949,68 +266,7 @@ bool ElevationMap::add(const PointCloudType::Ptr pointCloud, Eigen::VectorXf& po
     horizontalVarianceX = minHorizontalVariance_;
     horizontalVarianceY = minHorizontalVariance_;
     horizontalVarianceXY = 0.0;
-    lowerPointHeight = NAN;
-    lowerPointTime = NAN;
-    lowerPointCount = 0.0f;
     // RCLCPP_INFO(nodeHandle_->get_logger(), "Updated map cell: Elevation = %f, Variance = %f", elevation, variance);
-  }
-
-  if (enableAdaptiveLowerSurface_) {
-    const grid_map::Position3 sensorTranslation(transformationSensorToMap.translation());
-    for (grid_map::GridMapIterator iterator(currentScanMap); !iterator.isPastEnd(); ++iterator) {
-      if (currentScanMap.at("adaptive_lower_confirmed", *iterator) <= 0.5f) {
-        continue;
-      }
-
-      grid_map::Position scanPosition;
-      currentScanMap.getPosition(*iterator, scanPosition);
-      grid_map::Index rawIndex;
-      if (!rawMap_.getIndex(scanPosition, rawIndex)) {
-        continue;
-      }
-      if (isMultimodalHandled(rawIndex)) {
-        continue;
-      }
-
-      const float acceptedHeight =
-          adaptiveLowerPointHeightLayer(rawIndex(0), rawIndex(1));
-      const float acceptedVariance = currentScanMap.at("variance", *iterator);
-      elevationLayer(rawIndex(0), rawIndex(1)) = acceptedHeight;
-      varianceLayer(rawIndex(0), rawIndex(1)) = acceptedVariance;
-      horizontalVarianceXLayer(rawIndex(0), rawIndex(1)) = minHorizontalVariance_;
-      horizontalVarianceYLayer(rawIndex(0), rawIndex(1)) = minHorizontalVariance_;
-      horizontalVarianceXYLayer(rawIndex(0), rawIndex(1)) = 0.0;
-      colorLayer(rawIndex(0), rawIndex(1)) = currentScanMap.at("color", *iterator);
-      timeLayer(rawIndex(0), rawIndex(1)) = scanTimeSinceInitialization;
-      dynamicTimeLayer(rawIndex(0), rawIndex(1)) = currentTimeSecondsPattern;
-      lowestScanPointLayer(rawIndex(0), rawIndex(1)) =
-          acceptedHeight + 3.0f * std::sqrt(acceptedVariance);
-      sensorXatLowestScanLayer(rawIndex(0), rawIndex(1)) = sensorTranslation.x();
-      sensorYatLowestScanLayer(rawIndex(0), rawIndex(1)) = sensorTranslation.y();
-      sensorZatLowestScanLayer(rawIndex(0), rawIndex(1)) = sensorTranslation.z();
-      lowerPointHeightLayer(rawIndex(0), rawIndex(1)) = NAN;
-      lowerPointTimeLayer(rawIndex(0), rawIndex(1)) = NAN;
-      lowerPointCountLayer(rawIndex(0), rawIndex(1)) = 0.0f;
-      adaptiveLowerPointHeightLayer(rawIndex(0), rawIndex(1)) = NAN;
-      adaptiveLowerPointTimeLayer(rawIndex(0), rawIndex(1)) = NAN;
-      adaptiveLowerPointCountLayer(rawIndex(0), rawIndex(1)) = 0.0f;
-    }
-  }
-
-  if (enableMultimodalCells_) {
-    for (std::size_t key = 0; key < multimodalPrimaryUpdates.size(); ++key) {
-      if (multimodalPrimaryUpdates[key] == 0) {
-        continue;
-      }
-
-      const grid_map::Index index(
-          static_cast<int>(key / static_cast<std::size_t>(rawMapSize(1))),
-          static_cast<int>(key % static_cast<std::size_t>(rawMapSize(1))));
-      applyMultimodalPrimary(
-          rawMap_, index, multimodalResults[key].primary,
-          static_cast<float>(minHorizontalVariance_),
-          currentTimeSecondsPattern);
-    }
   }
 
   //std::stringstream ss;
@@ -1097,8 +353,6 @@ bool ElevationMap::fuse(const grid_map::Index& topLeftIndex, const grid_map::Ind
       continue;
     }
 
-    const float centerElevation = rawMapCopy.at("elevation", *areaIterator);
-
     // Get size of error ellipse.
     const float& sigmaXsquare = rawMapCopy.at("horizontal_variance_x", *areaIterator);
     const float& sigmaYsquare = rawMapCopy.at("horizontal_variance_y", *areaIterator);
@@ -1155,12 +409,7 @@ bool ElevationMap::fuse(const grid_map::Index& topLeftIndex, const grid_map::Ind
         continue;
       }
 
-      const float candidateElevation = rawMapCopy.at("elevation", *ellipseIterator);
-      if (edgeAwareFusion_ && std::fabs(candidateElevation - centerElevation) > fusionHeightDifferenceThreshold_) {
-        continue;
-      }
-
-      means[i] = candidateElevation;
+      means[i] = rawMapCopy.at("elevation", *ellipseIterator);
 
       // Compute weight from probability.
       grid_map::Position absolutePosition;
@@ -1189,10 +438,6 @@ bool ElevationMap::fuse(const grid_map::Index& topLeftIndex, const grid_map::Ind
       fusedMap_.at("upper_bound", *areaIterator) =
           rawMapCopy.at("elevation", *areaIterator) + 2.0 * sqrt(rawMapCopy.at("variance", *areaIterator));
       fusedMap_.at("color", *areaIterator) = rawMapCopy.at("color", *areaIterator);
-      for (const auto* layer : kMultimodalDiagnosticLayers) {
-        fusedMap_.at(layer, *areaIterator) =
-            rawMapCopy.at(layer, *areaIterator);
-      }
       continue;
     }
 
@@ -1215,10 +460,6 @@ bool ElevationMap::fuse(const grid_map::Index& topLeftIndex, const grid_map::Ind
     fusedMap_.at("upper_bound", *areaIterator) = upperBoundDistribution.quantile(0.99);  // TODO(max):
     // TODO(max): Add fusion of colors.
     fusedMap_.at("color", *areaIterator) = rawMapCopy.at("color", *areaIterator);
-    for (const auto* layer : kMultimodalDiagnosticLayers) {
-      fusedMap_.at(layer, *areaIterator) =
-          rawMapCopy.at(layer, *areaIterator);
-    }
   }
 
   fusedMap_.setTimestamp(rawMapCopy.getTimestamp());
@@ -1333,12 +574,8 @@ void ElevationMap::visibilityCleanup(const rclcpp::Time& updatedTime) {
 void ElevationMap::move(const Eigen::Vector2d& position) {
   boost::recursive_mutex::scoped_lock scopedLockForRawData(rawMapMutex_);
   std::vector<grid_map::BufferRegion> newRegions;
-  std::vector<grid_map::BufferRegion> newMultimodalRegions;
 
   if (rawMap_.move(position, newRegions)) {
-    multimodalStateMap_.move(position, newMultimodalRegions);
-    resetMultimodalState(multimodalStateMap_, newMultimodalRegions);
-    resetRawDiagnostics(rawMap_, newRegions);
     RCLCPP_DEBUG(nodeHandle_->get_logger(), "Elevation map has been moved to position (%f, %f).", rawMap_.getPosition().x(), rawMap_.getPosition().y());
 
     // The "dynamic_time" layer is meant to be interpreted as integer values, therefore nan:s need to be zeroed.
@@ -1401,7 +638,6 @@ bool ElevationMap::publishFusedElevationMap() {
   grid_map::GridMap fusedMapCopy = fusedMap_;
   const grid_map::GridMap planarSupportMap = fusedMapCopy;
   scopedLock.unlock();
-  fillHolesForPublication(fusedMapCopy);
   fillSmallElevationHolesIfEnabled(
       fusedMapCopy, enableSmallHoleFilling_, smallHoleFillingParameters_);
   processPiecewisePlanarElevationIfEnabled(
@@ -1413,41 +649,6 @@ bool ElevationMap::publishFusedElevationMap() {
   elevationMapFusedPublisher_->publish(std::move(message));
   RCLCPP_DEBUG(nodeHandle_->get_logger(), "Elevation map (fused) has been published.");
   return true;
-}
-
-void ElevationMap::fillHolesForPublication(grid_map::GridMap& map) const {
-  if (!enableFusedMapHoleFilling_ || fusedMapHoleFillingRadius_ <= 0.0 || !map.exists("elevation")) {
-    return;
-  }
-
-  const grid_map::GridMap originalMap = map;
-  for (grid_map::GridMapIterator iterator(map); !iterator.isPastEnd(); ++iterator) {
-    const grid_map::Index index(*iterator);
-    if (std::isfinite(originalMap.at("elevation", index))) {
-      continue;
-    }
-
-    grid_map::Index bestIndex;
-    if (fusedMapHoleFillingMinSupport_ <= 0 ||
-        !findEdgeSafeHoleFillSource(
-            originalMap, "elevation", "height_mode_count",
-            "height_mode_separation", index, fusedMapHoleFillingRadius_,
-            fusedMapHoleFillingHeightThreshold_,
-            static_cast<std::size_t>(fusedMapHoleFillingMinSupport_), bestIndex)) {
-      continue;
-    }
-
-    map.at("elevation", index) = originalMap.at("elevation", bestIndex);
-    if (map.exists("upper_bound") && originalMap.exists("upper_bound")) {
-      map.at("upper_bound", index) = originalMap.at("upper_bound", bestIndex);
-    }
-    if (map.exists("lower_bound") && originalMap.exists("lower_bound")) {
-      map.at("lower_bound", index) = originalMap.at("lower_bound", bestIndex);
-    }
-    if (map.exists("color") && originalMap.exists("color")) {
-      map.at("color", index) = originalMap.at("color", bestIndex);
-    }
-  }
 }
 
 bool ElevationMap::publishVisibilityCleanupMap() {
@@ -1513,10 +714,6 @@ bool ElevationMap::clear() {
     rawMap_.clearAll();
     rawMap_.resetTimestamp();
     rawMap_.get("dynamic_time").setZero();
-    resetRawDiagnostics(rawMap_);
-    multimodalStateMap_.clearAll();
-    multimodalStateMap_.resetTimestamp();
-    resetMultimodalState(multimodalStateMap_);
   }
   {
     boost::recursive_mutex::scoped_lock scopedLockForFusedData(fusedMapMutex_);
@@ -1530,9 +727,6 @@ void ElevationMap::setGeometry(const grid_map::Length& length, const double& res
   boost::recursive_mutex::scoped_lock scopedLockForRawData(rawMapMutex_);
   boost::recursive_mutex::scoped_lock scopedLockForFusedData(fusedMapMutex_);
   rawMap_.setGeometry(length, resolution, position);
-  resetRawDiagnostics(rawMap_);
-  multimodalStateMap_.setGeometry(length, resolution, position);
-  resetMultimodalState(multimodalStateMap_);
   fusedMap_.setGeometry(length, resolution, position);
   RCLCPP_INFO_STREAM(nodeHandle_->get_logger(), "Elevation map grid resized to " << rawMap_.getSize()(0) << " rows and " << rawMap_.getSize()(1) << " columns.");
 }
@@ -1615,36 +809,7 @@ grid_map::GridMap& ElevationMap::getRawGridMap() {
 
 void ElevationMap::setRawGridMap(const grid_map::GridMap& map) {
   boost::recursive_mutex::scoped_lock scopedLockForRawData(rawMapMutex_);
-  if (!hasValidRawMapGeometry(map) || !map.exists("elevation") ||
-      !map.exists("variance")) {
-    RCLCPP_ERROR(
-        nodeHandle_->get_logger(),
-        "Refusing raw map replacement with invalid geometry or missing "
-        "elevation/variance layers.");
-    return;
-  }
-
-  grid_map::GridMap replacement = map;
-  resetRawDiagnostics(replacement);
-
-  grid_map::GridMap replacementState(multimodalStateMap_.getLayers());
-  replacementState.setGeometry(
-      replacement.getLength(), replacement.getResolution(),
-      replacement.getPosition());
-  if ((replacementState.getSize() != replacement.getSize()).any()) {
-    RCLCPP_ERROR(
-        nodeHandle_->get_logger(),
-        "Refusing raw map replacement whose geometry cannot be represented by "
-        "the multimodal state grid.");
-    return;
-  }
-  replacementState.setFrameId(replacement.getFrameId());
-  replacementState.setTimestamp(replacement.getTimestamp());
-  replacementState.setStartIndex(replacement.getStartIndex());
-  resetMultimodalState(replacementState);
-
-  rawMap_ = replacement;
-  multimodalStateMap_ = replacementState;
+  rawMap_ = map;
 }
 
 grid_map::GridMap& ElevationMap::getFusedGridMap() {

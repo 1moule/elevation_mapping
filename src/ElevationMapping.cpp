@@ -9,8 +9,6 @@
 #define BOOST_BIND_NO_PLACEHOLDERS
 
 #include <cmath>
-#include <cstdint>
-#include <limits>
 #include <string>
 
 #include <grid_map_msgs/msg/grid_map.h>
@@ -158,18 +156,14 @@ ElevationMapping::~ElevationMapping() {
     rawSubmapService_.reset();
     fusionTriggerService_.reset();
     fusedSubmapService_.reset();
-    if (fusedMapPublishTimer_) {
-      fusedMapPublishTimer_->cancel();
-    }
+    fusedMapPublishTimer_->cancel();
 
     // fusionServiceQueue_.disable();
     // fusionServiceQueue_.clear();
   }
 
   {  // Visibility cleanup queue
-    if (visibilityCleanupTimer_) {
-      visibilityCleanupTimer_->cancel();
-    }
+    visibilityCleanupTimer_->cancel();
 
     // visibilityCleanupQueue_.disable();
     // visibilityCleanupQueue_.clear();
@@ -277,29 +271,6 @@ bool ElevationMapping::readParameters() {
   nodeHandle_->declare_parameter("multi_height_noise", pow(0.003, 2));
   nodeHandle_->declare_parameter("min_horizontal_variance", pow(resolution / 2.0, 2));  // two-sigma
   nodeHandle_->declare_parameter("max_horizontal_variance", 0.5);
-  nodeHandle_->declare_parameter("edge_aware_fusion", true);
-  nodeHandle_->declare_parameter("enable_multimodal_cells", false);
-  nodeHandle_->declare_parameter("multimodal_height_separation", 0.05);
-  nodeHandle_->declare_parameter("multimodal_min_points", 3);
-  nodeHandle_->declare_parameter("multimodal_min_xy_bins", 2);
-  nodeHandle_->declare_parameter("multimodal_switch_margin_bins", 1);
-  nodeHandle_->declare_parameter("multimodal_switch_confirmations", 3);
-  nodeHandle_->declare_parameter("multimodal_stale_timeout", 0.5);
-  nodeHandle_->declare_parameter("enable_skip_lower_points", false);
-  nodeHandle_->declare_parameter("skip_lower_points_duration", 0.5);
-  nodeHandle_->declare_parameter("lower_point_recovery_count", 5);
-  nodeHandle_->declare_parameter("enable_adaptive_lower_surface", false);
-  nodeHandle_->declare_parameter("lower_surface_neighbor_radius", 0.12);
-  nodeHandle_->declare_parameter("lower_surface_min_support", 4);
-  nodeHandle_->declare_parameter("lower_surface_min_candidate_support", 2);
-  nodeHandle_->declare_parameter("lower_surface_recovery_count", 2);
-  nodeHandle_->declare_parameter("lower_surface_height_threshold", 0.05);
-  nodeHandle_->declare_parameter("lower_surface_max_time_gap", 0.25);
-  nodeHandle_->declare_parameter("enable_fused_map_hole_filling", false);
-  nodeHandle_->declare_parameter("fused_map_hole_filling_radius", 0.08);
-  nodeHandle_->declare_parameter("fused_map_hole_filling_min_support", 4);
-  nodeHandle_->declare_parameter("fused_map_hole_filling_height_threshold", 0.05);
-  nodeHandle_->declare_parameter("fusion_height_difference_threshold", 0.08);
   nodeHandle_->declare_parameter("underlying_map_topic", std::string());
   nodeHandle_->declare_parameter("enable_visibility_cleanup", true);
   nodeHandle_->declare_parameter("enable_continuous_cleanup", false);
@@ -312,92 +283,11 @@ bool ElevationMapping::readParameters() {
   nodeHandle_->get_parameter("multi_height_noise", map_.multiHeightNoise_);
   nodeHandle_->get_parameter("min_horizontal_variance", map_.minHorizontalVariance_);  // two-sigma
   nodeHandle_->get_parameter("max_horizontal_variance", map_.maxHorizontalVariance_);
-  nodeHandle_->get_parameter("edge_aware_fusion", map_.edgeAwareFusion_);
-  bool enableMultimodalCells;
-  double multimodalHeightSeparation;
-  std::int64_t multimodalMinPoints;
-  std::int64_t multimodalMinXyBins;
-  std::int64_t multimodalSwitchMarginBins;
-  std::int64_t multimodalSwitchConfirmations;
-  double multimodalStaleTimeout;
-  nodeHandle_->get_parameter("enable_multimodal_cells", enableMultimodalCells);
-  nodeHandle_->get_parameter("multimodal_height_separation", multimodalHeightSeparation);
-  nodeHandle_->get_parameter("multimodal_min_points", multimodalMinPoints);
-  nodeHandle_->get_parameter("multimodal_min_xy_bins", multimodalMinXyBins);
-  nodeHandle_->get_parameter("multimodal_switch_margin_bins", multimodalSwitchMarginBins);
-  nodeHandle_->get_parameter("multimodal_switch_confirmations", multimodalSwitchConfirmations);
-  nodeHandle_->get_parameter("multimodal_stale_timeout", multimodalStaleTimeout);
-  nodeHandle_->get_parameter("enable_skip_lower_points", map_.enableSkipLowerPoints_);
-  nodeHandle_->get_parameter("skip_lower_points_duration", map_.skipLowerPointsDuration_);
-  nodeHandle_->get_parameter("lower_point_recovery_count", map_.lowerPointRecoveryCount_);
-  nodeHandle_->get_parameter("enable_adaptive_lower_surface", map_.enableAdaptiveLowerSurface_);
-  nodeHandle_->get_parameter("lower_surface_neighbor_radius", map_.lowerSurfaceNeighborRadius_);
-  nodeHandle_->get_parameter("lower_surface_min_support", map_.lowerSurfaceMinSupport_);
-  nodeHandle_->get_parameter("lower_surface_min_candidate_support", map_.lowerSurfaceMinCandidateSupport_);
-  nodeHandle_->get_parameter("lower_surface_recovery_count", map_.lowerSurfaceRecoveryCount_);
-  nodeHandle_->get_parameter("lower_surface_height_threshold", map_.lowerSurfaceHeightThreshold_);
-  nodeHandle_->get_parameter("lower_surface_max_time_gap", map_.lowerSurfaceMaxTimeGap_);
-  nodeHandle_->get_parameter("enable_fused_map_hole_filling", map_.enableFusedMapHoleFilling_);
-  nodeHandle_->get_parameter("fused_map_hole_filling_radius", map_.fusedMapHoleFillingRadius_);
-  nodeHandle_->get_parameter("fused_map_hole_filling_min_support", map_.fusedMapHoleFillingMinSupport_);
-  nodeHandle_->get_parameter("fused_map_hole_filling_height_threshold", map_.fusedMapHoleFillingHeightThreshold_);
-  nodeHandle_->get_parameter("fusion_height_difference_threshold", map_.fusionHeightDifferenceThreshold_);
   nodeHandle_->get_parameter("underlying_map_topic", map_.underlyingMapTopic_);
   nodeHandle_->get_parameter("enable_visibility_cleanup", map_.enableVisibilityCleanup_);
   nodeHandle_->get_parameter("enable_continuous_cleanup", map_.enableContinuousCleanup_);
   nodeHandle_->get_parameter("scanning_duration", map_.scanningDuration_);
   nodeHandle_->get_parameter("masked_replace_service_mask_layer_name", maskedReplaceServiceMaskLayerName_);
-
-  MultimodalConfig multimodalConfig;
-  multimodalConfig.modeSeparation =
-      static_cast<float>(multimodalHeightSeparation);
-  multimodalConfig.minPoints =
-      static_cast<std::size_t>(multimodalMinPoints);
-  multimodalConfig.minBins =
-      static_cast<std::size_t>(multimodalMinXyBins);
-  multimodalConfig.switchMarginBins =
-      static_cast<std::size_t>(multimodalSwitchMarginBins);
-  multimodalConfig.switchConfirmations =
-      static_cast<int>(multimodalSwitchConfirmations);
-  multimodalConfig.staleTimeout = multimodalStaleTimeout;
-  const bool validMultimodalIntegerParameters =
-      multimodalMinPoints >= 3 &&
-      multimodalMinXyBins >= 2 && multimodalMinXyBins <= 9 &&
-      multimodalSwitchMarginBins >= 1 &&
-      multimodalSwitchMarginBins <= 9 &&
-      multimodalSwitchConfirmations >= 2 &&
-      multimodalSwitchConfirmations <= std::numeric_limits<int>::max();
-  map_.enableMultimodalCells_ = enableMultimodalCells;
-  if (!validMultimodalIntegerParameters ||
-      !isValidMultimodalConfig(multimodalConfig)) {
-    RCLCPP_ERROR(nodeHandle_->get_logger(),
-                 "Invalid multimodal cell parameters; disabling multimodal cells.");
-    map_.enableMultimodalCells_ = false;
-  } else {
-    map_.multimodalConfig_ = multimodalConfig;
-  }
-
-  if (map_.enableAdaptiveLowerSurface_) {
-    const bool validAdaptiveParameters =
-        map_.enableSkipLowerPoints_ && map_.lowerSurfaceNeighborRadius_ > 0.0 &&
-        map_.lowerSurfaceMinSupport_ > 0 && map_.lowerSurfaceMinCandidateSupport_ >= 2 &&
-        map_.lowerSurfaceMinCandidateSupport_ <= map_.lowerSurfaceMinSupport_ &&
-        map_.lowerSurfaceRecoveryCount_ >= 2 && map_.lowerSurfaceHeightThreshold_ >= 0.0 &&
-        map_.lowerSurfaceMaxTimeGap_ > 0.0;
-    if (!validAdaptiveParameters) {
-      RCLCPP_ERROR(nodeHandle_->get_logger(),
-                   "Invalid adaptive lower-surface parameters; disabling adaptive lower-surface recovery.");
-      map_.enableAdaptiveLowerSurface_ = false;
-    }
-  }
-  if (map_.enableFusedMapHoleFilling_ &&
-      (map_.fusedMapHoleFillingRadius_ <= 0.0 ||
-       map_.fusedMapHoleFillingMinSupport_ <= 0 ||
-       map_.fusedMapHoleFillingHeightThreshold_ < 0.0)) {
-    RCLCPP_ERROR(nodeHandle_->get_logger(),
-                 "Invalid fused-map hole-filling parameters; disabling fused-map hole filling.");
-    map_.enableFusedMapHoleFilling_ = false;
-  }
 
   // Settings for initializing elevation map
   nodeHandle_->declare_parameter("initialize_elevation_map", false);
@@ -925,14 +815,9 @@ bool ElevationMapping::loadMapServiceCallback(std::shared_ptr<grid_map_msgs::srv
 
   response->success =
       static_cast<unsigned char>(grid_map::GridMapRosConverter::loadFromBag(request->file_path, topic, map_.getFusedGridMap()));
-  grid_map::GridMap loadedRawMap;
-  const bool rawMapLoaded = grid_map::GridMapRosConverter::loadFromBag(
-      request->file_path + "_raw", topic + "_raw", loadedRawMap);
-  if (rawMapLoaded) {
-    map_.setRawGridMap(loadedRawMap);
-  }
   response->success = static_cast<unsigned char>(
-      rawMapLoaded && static_cast<bool>(response->success));
+      grid_map::GridMapRosConverter::loadFromBag(request->file_path + "_raw", topic + "_raw", map_.getRawGridMap()) &&
+      static_cast<bool>(response->success));
 
   // Update timestamp for visualization in ROS
   map_.setTimestamp(nodeHandle_->get_clock()->now());
