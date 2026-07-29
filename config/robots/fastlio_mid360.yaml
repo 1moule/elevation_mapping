@@ -78,6 +78,21 @@ elevation_mapping:
       covariance_scale_rotation_y: 0.0
       covariance_scale_rotation_z: 0.0
 
+    enable_small_hole_filling: true
+    small_hole_max_size: 4
+    small_hole_min_support: 4
+    small_hole_max_height_range: 0.05
+    enable_piecewise_planar_regularization: true
+    planar_neighbor_height_tolerance: 0.04
+    planar_min_region_size: 30
+    planar_max_region_mad: 0.015
+    planar_max_regularization_residual: 0.03
+    planar_max_occlusion_distance: 0.10
+    planar_min_occlusion_support: 6
+    planar_inferred_half_range: 0.05
+    enable_directional_ground_completion: true
+    directional_ground_max_gap_width: 0.25
+
     initialize_elevation_map: false
     initialization_method: 0
     length_in_x_init_submap: 1.0

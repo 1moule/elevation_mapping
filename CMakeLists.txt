@@ -102,6 +102,9 @@ add_library(${PROJECT_NAME}_library
   src/ElevationMapping.cpp
   src/ElevationMap.cpp
   src/MultimodalElevation.cpp
+  src/ScanCellSelector.cpp
+  src/SmallHoleFiller.cpp
+  src/PiecewisePlanarProcessor.cpp
   src/input_sources/Input.cpp
   src/input_sources/InputSourceManager.cpp
   src/postprocessing/PostprocessorPool.cpp
@@ -272,6 +275,19 @@ if(BUILD_TESTING)
       include
   )
 
+  ament_add_gtest(test_scan_cell_selector
+    test/ScanCellSelectorTest.cpp
+  )
+
+  target_link_libraries(test_scan_cell_selector
+    ${PROJECT_NAME}_library
+  )
+
+  target_include_directories(test_scan_cell_selector
+    PRIVATE
+      include
+  )
+
   ament_add_gtest(test_${PROJECT_NAME}_lifecycle
     test/ElevationMappingLifecycleTest.cpp
   )
@@ -281,6 +297,32 @@ if(BUILD_TESTING)
   )
 
   target_include_directories(test_${PROJECT_NAME}_lifecycle
+    PRIVATE
+      include
+  )
+
+  ament_add_gtest(test_small_hole_filler
+    test/SmallHoleFillerTest.cpp
+  )
+
+  target_link_libraries(test_small_hole_filler
+    ${PROJECT_NAME}_library
+  )
+
+  target_include_directories(test_small_hole_filler
+    PRIVATE
+      include
+  )
+
+  ament_add_gtest(test_piecewise_planar_processor
+    test/PiecewisePlanarProcessorTest.cpp
+  )
+
+  target_link_libraries(test_piecewise_planar_processor
+    ${PROJECT_NAME}_library
+  )
+
+  target_include_directories(test_piecewise_planar_processor
     PRIVATE
       include
   )

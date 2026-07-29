@@ -21,6 +21,8 @@
 #include "elevation_mapping/EdgeAwareMapUtils.hpp"
 #include "elevation_mapping/MultimodalElevation.hpp"
 #include "elevation_mapping/PointXYZRGBConfidenceRatio.hpp"
+#include "elevation_mapping/ScanCellSelector.hpp"
+#include "elevation_mapping/SmallHoleFiller.hpp"
 #include "elevation_mapping/WeightedEmpiricalCumulativeDistributionFunction.hpp"
 
 namespace {
@@ -374,7 +376,70 @@ ElevationMap::ElevationMap(std::shared_ptr<rclcpp::Node> nodeHandle)
       enableVisibilityCleanup_(true),
       enableContinuousCleanup_(false),
       visibilityCleanupDuration_(0.0),
-      scanningDuration_(1.0) {
+      scanningDuration_(1.0),
+      enableSmallHoleFilling_(defaultSmallHoleFillingEnabled()),
+      smallHoleFillingParameters_{4u, 4u, 0.05f},
+      enablePiecewisePlanarRegularization_(
+          defaultPiecewisePlanarRegularizationEnabled()),
+      piecewisePlanarParameters_{
+          0.06f, 12u, 0.03f, 0.05f, 0.12f, 4u, 0.05f, false, 0.40f} {
+  nodeHandle_->declare_parameter(
+      "enable_small_hole_filling", defaultSmallHoleFillingEnabled());
+  nodeHandle_->declare_parameter("small_hole_max_size", 4);
+  nodeHandle_->declare_parameter("small_hole_min_support", 4);
+  nodeHandle_->declare_parameter("small_hole_max_height_range", 0.05);
+  nodeHandle_->get_parameter("enable_small_hole_filling", enableSmallHoleFilling_);
+  int maxHoleSize;
+  int minSupport;
+  nodeHandle_->get_parameter("small_hole_max_size", maxHoleSize);
+  nodeHandle_->get_parameter("small_hole_min_support", minSupport);
+  nodeHandle_->get_parameter("small_hole_max_height_range", smallHoleFillingParameters_.maxHeightRange);
+  smallHoleFillingParameters_.maxHoleSize = static_cast<std::size_t>(maxHoleSize);
+  smallHoleFillingParameters_.minSupport = static_cast<std::size_t>(minSupport);
+  nodeHandle_->declare_parameter(
+      "enable_piecewise_planar_regularization",
+      defaultPiecewisePlanarRegularizationEnabled());
+  nodeHandle_->declare_parameter("planar_neighbor_height_tolerance", 0.06);
+  nodeHandle_->declare_parameter("planar_min_region_size", 12);
+  nodeHandle_->declare_parameter("planar_max_region_mad", 0.03);
+  nodeHandle_->declare_parameter("planar_max_regularization_residual", 0.05);
+  nodeHandle_->declare_parameter("planar_max_occlusion_distance", 0.12);
+  nodeHandle_->declare_parameter("planar_min_occlusion_support", 4);
+  nodeHandle_->declare_parameter("planar_inferred_half_range", 0.05);
+  nodeHandle_->declare_parameter("enable_directional_ground_completion", false);
+  nodeHandle_->declare_parameter("directional_ground_max_gap_width", 0.40);
+  nodeHandle_->get_parameter(
+      "enable_piecewise_planar_regularization",
+      enablePiecewisePlanarRegularization_);
+  int minRegionSize;
+  int minOcclusionSupport;
+  nodeHandle_->get_parameter(
+      "planar_neighbor_height_tolerance",
+      piecewisePlanarParameters_.neighborHeightTolerance);
+  nodeHandle_->get_parameter("planar_min_region_size", minRegionSize);
+  nodeHandle_->get_parameter(
+      "planar_max_region_mad", piecewisePlanarParameters_.maxRegionMad);
+  nodeHandle_->get_parameter(
+      "planar_max_regularization_residual",
+      piecewisePlanarParameters_.maxRegularizationResidual);
+  nodeHandle_->get_parameter(
+      "planar_max_occlusion_distance",
+      piecewisePlanarParameters_.maxOcclusionDistance);
+  nodeHandle_->get_parameter(
+      "planar_min_occlusion_support", minOcclusionSupport);
+  nodeHandle_->get_parameter(
+      "planar_inferred_half_range",
+      piecewisePlanarParameters_.inferredHalfRange);
+  nodeHandle_->get_parameter(
+      "enable_directional_ground_completion",
+      piecewisePlanarParameters_.enableDirectionalGroundCompletion);
+  nodeHandle_->get_parameter(
+      "directional_ground_max_gap_width",
+      piecewisePlanarParameters_.directionalGroundMaxGapWidth);
+  piecewisePlanarParameters_.minRegionSize =
+      static_cast<std::size_t>(minRegionSize < 0 ? 0 : minRegionSize);
+  piecewisePlanarParameters_.minOcclusionSupport =
+      static_cast<std::size_t>(minOcclusionSupport < 0 ? 0 : minOcclusionSupport);
   rawMap_.setBasicLayers({"elevation", "variance"});
   fusedMap_.setBasicLayers({"elevation", "upper_bound", "lower_bound"});
   clear();
@@ -711,7 +776,9 @@ bool ElevationMap::add(const PointCloudType::Ptr pointCloud, Eigen::VectorXf& po
     basicLayers_.push_back(rawMap_.get(layer));
   }
 
-  for (unsigned int i = 0; i < pointCloud->size(); ++i) {
+  const auto selectedPointIndices =
+      selectScanCellRepresentatives(rawMap_, *pointCloud);
+  for (const auto i : selectedPointIndices) {
     auto& point = pointCloud->points[i];
     grid_map::Index index;
     grid_map::Position position(point.x, point.y);  // NOLINT(cppcoreguidelines-pro-type-union-access)
@@ -749,7 +816,8 @@ bool ElevationMap::add(const PointCloudType::Ptr pointCloud, Eigen::VectorXf& po
     auto& adaptiveLowerPointTime = adaptiveLowerPointTimeLayer(index(0), index(1));
     auto& adaptiveLowerPointCount = adaptiveLowerPointCountLayer(index(0), index(1));
 
-    const float pointVariance = std::max(static_cast<float>(minVariance_), static_cast<float>(pointCloudVariances(i)));
+    const float pointVariance =
+        sanitizePointVariance(pointCloudVariances(i), minVariance_);
     bool isValid = std::all_of(basicLayers_.begin(), basicLayers_.end(),
                                [&](Eigen::Ref<const grid_map::Matrix> layer) { 
                                 return std::isfinite(layer(index(0), index(1))); });
@@ -1331,8 +1399,14 @@ bool ElevationMap::publishFusedElevationMap() {
   }
   boost::recursive_mutex::scoped_lock scopedLock(fusedMapMutex_);
   grid_map::GridMap fusedMapCopy = fusedMap_;
+  const grid_map::GridMap planarSupportMap = fusedMapCopy;
   scopedLock.unlock();
   fillHolesForPublication(fusedMapCopy);
+  fillSmallElevationHolesIfEnabled(
+      fusedMapCopy, enableSmallHoleFilling_, smallHoleFillingParameters_);
+  processPiecewisePlanarElevationIfEnabled(
+      planarSupportMap, fusedMapCopy, enablePiecewisePlanarRegularization_,
+      piecewisePlanarParameters_);
   fusedMapCopy.add("uncertainty_range", fusedMapCopy.get("upper_bound") - fusedMapCopy.get("lower_bound"));
   std::unique_ptr<grid_map_msgs::msg::GridMap> message;
   message = grid_map::GridMapRosConverter::toMessage(fusedMapCopy);
